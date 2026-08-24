@@ -14,6 +14,7 @@ public final class VolumeMountManager: @unchecked Sendable {
     private var mountedVolumes: [String: URL] = [:]
     private var populatedDirs: Set<String> = []
     private var selfInitiatedRemovals: Set<String> = [] // Local paths removed intentionally by OpenDuck (eviction, reconcile)
+    private var hydratingPaths: Set<String> = [] // Local paths currently being hydrated (download in progress)
     private var activeStreams: [String: FSEventStreamRef] = [:]
     private var activeContexts: [String: WatcherContext] = [:]
     private let baseStorageDir: URL
@@ -29,10 +30,31 @@ public final class VolumeMountManager: @unchecked Sendable {
 
     public func recordSelfInitiatedRemoval(path: String) {
         sync { selfInitiatedRemovals.insert(path) }
+        // Persist to SQLite for crash resilience
+        MetadataDatabase.shared.recordSelfInitiatedRemoval(localPath: path)
     }
 
     public func isSelfInitiatedRemoval(path: String) -> Bool {
-        sync { selfInitiatedRemovals.remove(path) != nil }
+        // Check in-memory first (fast path), then fall back to persisted tokens
+        let inMemory: Bool = sync { selfInitiatedRemovals.remove(path) != nil }
+        if inMemory {
+            // Also consume the persisted token
+            _ = MetadataDatabase.shared.consumeSelfInitiatedRemoval(localPath: path)
+            return true
+        }
+        // Fall back to persisted token (crash recovery scenario)
+        return MetadataDatabase.shared.consumeSelfInitiatedRemoval(localPath: path)
+    }
+
+    /// Register a path as currently being hydrated (download in progress).
+    /// FSEvents writes during hydration should not trigger uploads.
+    public func recordHydratingPath(_ path: String) {
+        sync { hydratingPaths.insert(path) }
+    }
+
+    /// Check and consume a hydrating path token. Returns true if the path was being hydrated.
+    public func isHydratingPath(_ path: String) -> Bool {
+        sync { hydratingPaths.remove(path) != nil }
     }
 
     @discardableResult
@@ -313,8 +335,17 @@ public final class VolumeMountManager: @unchecked Sendable {
         isReadOnly: Bool = false
     ) async throws {
         let localURL = URL(fileURLWithPath: localPath)
+        // Register this path as being hydrated so FSEvents doesn't misclassify
+        // the download write as a user edit that needs uploading back.
+        recordHydratingPath(localPath)
         try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: localURL.path)
-        try await adapter.download(remotePath: remotePath, to: localURL, progress: nil)
+        do {
+            try await adapter.download(remotePath: remotePath, to: localURL, progress: nil)
+        } catch {
+            // Clear hydrating state on failure so path isn't permanently suppressed
+            _ = isHydratingPath(localPath)
+            throw error
+        }
         Self.removePlaceholderXAttr(path: localPath)
         removePlaceholder(path: localPath)
         if isReadOnly {
@@ -421,6 +452,14 @@ public final class VolumeMountManager: @unchecked Sendable {
         let cleanName = name.replacingOccurrences(of: "/", with: "-")
         return sync { activeContexts[cleanName]?.isCircuitBreakerTripped ?? false }
     }
+
+    /// Cancels any active in-flight transfer for the given remote path and optionally deletes the local item.
+    public func cancelTransfer(remotePath: String, localURL: URL? = nil, deleteLocal: Bool = false) {
+        let contexts: [WatcherContext] = sync { Array(activeContexts.values) }
+        for ctx in contexts {
+            ctx.cancelTransfer(remotePath: remotePath, localURL: localURL, deleteLocal: deleteLocal)
+        }
+    }
 }
 
 // MARK: - Watcher Context & Safe Event Dispatcher
@@ -437,6 +476,8 @@ public final class WatcherContext: @unchecked Sendable {
 
     private var pendingPaths = Set<String>()
     private var syncDebounceWorkItems: [String: DispatchWorkItem] = [:]
+    private var activeUploadTasks: [String: Task<Void, Never>] = [:]
+    private var activeTrackers: [String: TransferTracker] = [:]
     private var deletionTimestamps: [Date] = []
     public private(set) var isCircuitBreakerTripped: Bool = false
     private var isStopped: Bool = false
@@ -449,7 +490,42 @@ public final class WatcherContext: @unchecked Sendable {
             item.cancel()
         }
         syncDebounceWorkItems.removeAll()
+        for (_, task) in activeUploadTasks {
+            task.cancel()
+        }
+        activeUploadTasks.removeAll()
+        activeTrackers.removeAll()
         lock.unlock()
+    }
+
+    public func cancelTransfer(remotePath: String, localURL: URL? = nil, deleteLocal: Bool = false) {
+        lock.lock()
+        syncDebounceWorkItems[remotePath]?.cancel()
+        syncDebounceWorkItems.removeValue(forKey: remotePath)
+        let task = activeUploadTasks.removeValue(forKey: remotePath)
+        let tracker = activeTrackers.removeValue(forKey: remotePath)
+        lock.unlock()
+
+        task?.cancel()
+        if let tracker = tracker {
+            tracker.markFailed(error: AdapterError.unsupportedOperation("Transfer cancelled by user"))
+        }
+
+        if deleteLocal {
+            let targetURL = localURL ?? tracker?.localURL
+            if let targetURL = targetURL {
+                manager.recordSelfInitiatedRemoval(path: targetURL.path)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: targetURL.path)
+                try? FileManager.default.removeItem(at: targetURL)
+                let itemId = cacheEngine.itemIdentifier(for: remotePath)
+                try? cacheEngine.evict(itemIdentifier: itemId)
+                MetadataDatabase.shared.deleteRecord(localPath: targetURL.path)
+                manager.removePlaceholder(path: targetURL.path)
+                onStatusChange?("✓ Deleted local file and cancelled transfer: \(targetURL.lastPathComponent)")
+            }
+        } else {
+            onStatusChange?("🛑 Cancelled upload for: \((remotePath as NSString).lastPathComponent)")
+        }
     }
 
     public init(
@@ -580,10 +656,37 @@ public final class WatcherContext: @unchecked Sendable {
                 }
             } else if isRemoved {
                 if isReadOnly { return }
-                guard recordAndCheckCircuitBreaker() else { return }
+
+                // PROVENANCE GUARD: Check if OpenDuck initiated this removal
+                if manager.isSelfInitiatedRemoval(path: localPath) {
+                    return
+                }
+
+                let dirItemId = self.cacheEngine.itemIdentifier(for: remotePath)
+                guard recordAndCheckCircuitBreaker() else {
+                    // Journal the blocked directory deletion
+                    let journalEntry = JournalEntry(
+                        action: .delete,
+                        itemIdentifier: dirItemId,
+                        remotePath: remotePath
+                    )
+                    self.cacheEngine.journal.append(journalEntry)
+                    return
+                }
                 Task {
-                    try? await self.adapter.delete(remotePath: remotePath)
-                    self.manager.invalidateDirectory(remotePath: remotePath)
+                    do {
+                        try await self.adapter.delete(remotePath: remotePath)
+                        self.manager.invalidateDirectory(remotePath: remotePath)
+                    } catch {
+                        // Journal the failed directory deletion for retry
+                        let journalEntry = JournalEntry(
+                            action: .delete,
+                            itemIdentifier: dirItemId,
+                            remotePath: remotePath
+                        )
+                        self.cacheEngine.journal.append(journalEntry)
+                        print("🔄 [OpenDuck] Directory delete failed, journaled for retry: \(remotePath) — \(error)")
+                    }
                 }
             }
             return
@@ -612,13 +715,20 @@ public final class WatcherContext: @unchecked Sendable {
                 return
             }
 
+            // HYDRATION LOOP GUARD: If this file was just hydrated (downloaded from remote),
+            // the write to disk triggers an FSEvent. Suppress the upload to prevent a loop.
+            if manager.isHydratingPath(localPath) {
+                return
+            }
+
             guard let attrs = try? FileManager.default.attributesOfItem(atPath: localPath),
                   let fileSize = attrs[.size] as? Int64 else {
                 return
             }
 
-            // SAFEGUARD LAYER 5: Never automatically upload 0-byte files
-            guard fileSize > 0 else {
+            // SAFEGUARD LAYER 5: Never automatically upload placeholder stub files (0-byte with xattr).
+            // Genuine empty files (e.g. .gitkeep, __init__.py) are allowed through.
+            if fileSize == 0 && VolumeMountManager.isPlaceholderXAttr(path: localPath) {
                 return
             }
 
@@ -640,18 +750,26 @@ public final class WatcherContext: @unchecked Sendable {
             syncDebounceWorkItems[remotePath]?.cancel()
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
-                Task {
-                    let tracker = TransferTracker(
-                        localURL: localURL,
-                        remotePath: remotePath,
-                        direction: .upload,
-                        totalBytes: fileSize,
-                        onUpdate: self.onTransferUpdate
-                    )
+                let tracker = TransferTracker(
+                    localURL: localURL,
+                    remotePath: remotePath,
+                    direction: .upload,
+                    totalBytes: fileSize,
+                    onUpdate: self.onTransferUpdate
+                )
 
-                    let progress = Progress(totalUnitCount: fileSize)
-                    let observation = progress.observe(\.completedUnitCount) { p, _ in
-                        tracker.update(bytesTransferred: p.completedUnitCount)
+                let progress = Progress(totalUnitCount: fileSize)
+                let observation = progress.observe(\.completedUnitCount) { p, _ in
+                    tracker.update(bytesTransferred: p.completedUnitCount)
+                }
+
+                let uploadTask = Task {
+                    defer {
+                        self.lock.withLock {
+                            self.activeUploadTasks.removeValue(forKey: remotePath)
+                            self.activeTrackers.removeValue(forKey: remotePath)
+                        }
+                        _ = observation
                     }
 
                     do {
@@ -661,12 +779,19 @@ public final class WatcherContext: @unchecked Sendable {
                         self.cacheEngine.markClean(itemIdentifier: itemId, remotePath: remotePath)
                         MetadataDatabase.shared.markClean(localPath: localPath, remoteMtime: Date(), size: fileSize)
                         self.onStatusChange?("✓ Uploaded \(filename)")
+                    } catch is CancellationError {
+                        tracker.markFailed(error: AdapterError.unsupportedOperation("Upload cancelled"))
+                        self.onStatusChange?("🛑 Cancelled upload of \(filename)")
                     } catch {
                         tracker.markFailed(error: error)
                         self.onStatusChange?("🛑 Safety/Upload notice: \(error.localizedDescription)")
                     }
-                    _ = observation
                 }
+
+                self.lock.lock()
+                self.activeUploadTasks[remotePath] = uploadTask
+                self.activeTrackers[remotePath] = tracker
+                self.lock.unlock()
             }
             syncDebounceWorkItems[remotePath] = workItem
             lock.unlock()
@@ -684,9 +809,31 @@ public final class WatcherContext: @unchecked Sendable {
                 return // OpenDuck initiated this local removal; NEVER send delete to remote!
             }
 
+            // Cancel any pending debounced upload or active in-flight upload task immediately
+            lock.lock()
+            syncDebounceWorkItems[remotePath]?.cancel()
+            syncDebounceWorkItems.removeValue(forKey: remotePath)
+            let inFlightTask = activeUploadTasks.removeValue(forKey: remotePath)
+            let inFlightTracker = activeTrackers.removeValue(forKey: remotePath)
+            lock.unlock()
+
+            inFlightTask?.cancel()
+            inFlightTracker?.markFailed(error: AdapterError.unsupportedOperation("File deleted during upload"))
+
+            let itemId = self.cacheEngine.itemIdentifier(for: remotePath)
+
             // SAFEGUARD LAYER 6: Mass Deletion Circuit Breaker
             guard recordAndCheckCircuitBreaker() else {
                 print("🛡️ [OpenDuck] Mass deletion blocked by circuit breaker for: \(remotePath)")
+                // JOURNAL THE BLOCKED DELETION instead of silently dropping it.
+                // When the circuit breaker is reset, syncPendingWrites will process these.
+                let journalEntry = JournalEntry(
+                    action: .delete,
+                    itemIdentifier: itemId,
+                    remotePath: remotePath
+                )
+                self.cacheEngine.journal.append(journalEntry)
+                self.onStatusChange?("⏸ Deletion queued (circuit breaker active): \(filename)")
                 return
             }
 
@@ -694,13 +841,21 @@ public final class WatcherContext: @unchecked Sendable {
                 do {
                     self.onStatusChange?("Deleting \(filename)...")
                     try await self.adapter.delete(remotePath: remotePath)
-                    let itemId = self.cacheEngine.itemIdentifier(for: remotePath)
                     try? self.cacheEngine.evict(itemIdentifier: itemId)
                     self.manager.removePlaceholder(path: localPath)
                     MetadataDatabase.shared.deleteRecord(localPath: localPath)
                     self.onStatusChange?("✓ Deleted \(filename)")
                 } catch {
-                    // Ignore if already deleted on remote server
+                    // JOURNAL THE FAILED DELETION for retry instead of silently swallowing.
+                    // On reconnect or next retry cycle, syncPendingWrites will process it.
+                    let journalEntry = JournalEntry(
+                        action: .delete,
+                        itemIdentifier: itemId,
+                        remotePath: remotePath
+                    )
+                    self.cacheEngine.journal.append(journalEntry)
+                    self.onStatusChange?("⚠️ Delete failed, queued for retry: \(filename) — \(error.localizedDescription)")
+                    print("🔄 [OpenDuck] Delete failed, journaled for retry: \(remotePath) — \(error)")
                 }
             }
         }

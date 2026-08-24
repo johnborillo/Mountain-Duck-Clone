@@ -139,6 +139,11 @@ public final class MetadataDatabase: @unchecked Sendable {
             reason TEXT NOT NULL,
             timestamp REAL NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS self_initiated_removals (
+            local_path TEXT PRIMARY KEY,
+            created_at REAL NOT NULL
+        );
         """
 
         lock.lock()
@@ -560,5 +565,67 @@ public final class MetadataDatabase: @unchecked Sendable {
             lastSynced: lastSynced,
             isPinned: isPinned
         )
+    }
+
+    // MARK: - Self-Initiated Removal Provenance Tracking
+
+    /// Persist a self-initiated removal token so it survives app crashes.
+    public func recordSelfInitiatedRemoval(localPath: String) {
+        let sql = """
+        INSERT OR REPLACE INTO self_initiated_removals (local_path, created_at) VALUES (?, ?);
+        """
+        lock.lock()
+        defer { lock.unlock() }
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(stmt, 1, (localPath as NSString).utf8String, -1, nil)
+            sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+            sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
+    }
+
+    /// Check and consume a persisted self-initiated removal token.
+    /// Returns true if the token existed (and was consumed).
+    public func consumeSelfInitiatedRemoval(localPath: String) -> Bool {
+        let checkSql = "SELECT COUNT(*) FROM self_initiated_removals WHERE local_path = ?;"
+        let deleteSql = "DELETE FROM self_initiated_removals WHERE local_path = ?;"
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        var stmt: OpaquePointer?
+        var exists = false
+        if sqlite3_prepare_v2(db, checkSql, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(stmt, 1, (localPath as NSString).utf8String, -1, nil)
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                exists = sqlite3_column_int(stmt, 0) > 0
+            }
+        }
+        sqlite3_finalize(stmt)
+
+        if exists {
+            var deleteStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, deleteSql, -1, &deleteStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(deleteStmt, 1, (localPath as NSString).utf8String, -1, nil)
+                sqlite3_step(deleteStmt)
+            }
+            sqlite3_finalize(deleteStmt)
+        }
+        return exists
+    }
+
+    /// Clean up stale provenance tokens older than the given TTL (default: 60 seconds).
+    public func cleanupStaleRemovalTokens(ttlSeconds: TimeInterval = 60.0) {
+        let cutoff = Date().timeIntervalSince1970 - ttlSeconds
+        let sql = "DELETE FROM self_initiated_removals WHERE created_at < ?;"
+        lock.lock()
+        defer { lock.unlock() }
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_double(stmt, 1, cutoff)
+            sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
     }
 }

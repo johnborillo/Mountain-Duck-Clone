@@ -2,6 +2,7 @@ import SwiftUI
 import OpenDuckCore
 
 /// Main popover view rendered in the macOS Menu Bar.
+@MainActor
 public struct MenuBarView: View {
     @ObservedObject var viewModel: AppViewModel
 
@@ -217,8 +218,9 @@ public struct MenuBarView: View {
                 .disabled(viewModel.isMounting)
             }
 
-            if isMounted {
-                HStack(spacing: 12) {
+            // Secondary Action Row (Available in both mounted & unmounted states)
+            HStack(spacing: 12) {
+                if isMounted {
                     Button(action: {
                         viewModel.openInFinder(for: profile)
                     }) {
@@ -245,20 +247,33 @@ public struct MenuBarView: View {
                         }
                         .buttonStyle(.borderless)
                     }
-
-                    Spacer()
-
-                    Button(action: {
-                        viewModel.deleteProfile(profile.id)
-                    }) {
-                        Image(systemName: "trash")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
                 }
-                .padding(.top, 2)
+
+                Spacer()
+
+                // Edit Connection Button
+                Button(action: {
+                    viewModel.startEditing(profile: profile)
+                }) {
+                    Image(systemName: "pencil")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Edit Connection")
+
+                // Delete Connection Button
+                Button(action: {
+                    viewModel.deleteProfile(profile.id)
+                }) {
+                    Image(systemName: "trash")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Delete Connection")
             }
+            .padding(.top, 2)
         }
         .padding(.vertical, 6)
     }
@@ -288,6 +303,28 @@ public struct MenuBarView: View {
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
                 }
+
+                // Cancel Transfer Action
+                Button(action: {
+                    viewModel.cancelTransfer(transfer, deleteItem: false)
+                }) {
+                    Image(systemName: "xmark.circle")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Cancel Transfer")
+
+                // Cancel & Delete File Action
+                Button(action: {
+                    viewModel.cancelTransfer(transfer, deleteItem: true)
+                }) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Cancel & Delete Item")
             }
 
             ProgressView(value: transfer.progressFraction)

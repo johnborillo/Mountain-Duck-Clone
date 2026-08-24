@@ -2,6 +2,7 @@ import SwiftUI
 import OpenDuckCore
 
 /// Preferences view rendered in-place within the menu bar popover.
+@MainActor
 public struct PreferencesView: View {
     @ObservedObject var viewModel: AppViewModel
     @State private var maxCacheSizeGB: Double = 5.0

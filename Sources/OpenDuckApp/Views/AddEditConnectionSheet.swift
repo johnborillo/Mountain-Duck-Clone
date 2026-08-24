@@ -3,6 +3,7 @@ import OpenDuckCore
 import AppKit
 
 /// Form view for configuring new remote server connections with clean native layout.
+@MainActor
 public struct AddEditConnectionSheet: View {
     @ObservedObject var viewModel: AppViewModel
 
@@ -22,11 +23,16 @@ public struct AddEditConnectionSheet: View {
         self.viewModel = viewModel
     }
 
+    private var isEditing: Bool {
+        viewModel.editingProfile != nil
+    }
+
     public var body: some View {
         VStack(spacing: 0) {
             // Header with Back Button
             HStack {
                 Button(action: {
+                    viewModel.editingProfile = nil
                     viewModel.currentScreen = .main
                 }) {
                     HStack(spacing: 4) {
@@ -40,7 +46,7 @@ public struct AddEditConnectionSheet: View {
 
                 Spacer()
 
-                Text("New Connection")
+                Text(isEditing ? "Edit Connection" : "New Connection")
                     .font(.headline)
 
                 Spacer()
@@ -194,6 +200,7 @@ public struct AddEditConnectionSheet: View {
             // Footer Actions
             HStack {
                 Button("Cancel") {
+                    viewModel.editingProfile = nil
                     viewModel.currentScreen = .main
                 }
                 .buttonStyle(.plain)
@@ -201,7 +208,7 @@ public struct AddEditConnectionSheet: View {
 
                 Spacer()
 
-                Button("Save & Connect") {
+                Button(isEditing ? "Save Changes" : "Save & Connect") {
                     saveProfile()
                 }
                 .buttonStyle(.borderedProminent)
@@ -213,6 +220,26 @@ public struct AddEditConnectionSheet: View {
             .background(Color(NSColor.controlBackgroundColor))
         }
         .frame(width: 400, height: 500)
+        .onAppear {
+            populateIfEditing()
+        }
+    }
+
+    private func populateIfEditing() {
+        guard let profile = viewModel.editingProfile else { return }
+        name = profile.name
+        protocolType = profile.protocolType
+        host = profile.host
+        port = String(profile.port)
+        username = profile.username
+        authType = profile.authType
+        privateKeyPath = profile.privateKeyPath ?? ""
+        remoteRootPath = profile.remoteRootPath
+        autoConnect = profile.autoConnect
+        isReadOnly = profile.isReadOnly
+        if let secret = viewModel.connectionManager.keychain.loadSecret(for: profile.id) {
+            passwordSecret = secret
+        }
     }
 
     private func browseKeyFile() {
@@ -230,18 +257,37 @@ public struct AddEditConnectionSheet: View {
 
     private func saveProfile() {
         let portInt = Int(port) ?? (protocolType == .sftp ? 22 : 80)
-        let profile = ServerProfile(
-            name: name.isEmpty ? "Server (\(host))" : name,
-            protocolType: protocolType,
-            host: host.isEmpty ? "localhost" : host,
-            port: portInt,
-            username: username,
-            authType: authType,
-            privateKeyPath: privateKeyPath.isEmpty ? nil : privateKeyPath,
-            remoteRootPath: remoteRootPath.isEmpty ? "/" : remoteRootPath,
-            autoConnect: autoConnect,
-            isReadOnly: isReadOnly
-        )
-        viewModel.addProfile(profile, secret: passwordSecret)
+        if let existing = viewModel.editingProfile {
+            let updated = ServerProfile(
+                id: existing.id,
+                name: name.isEmpty ? "Server (\(host))" : name,
+                protocolType: protocolType,
+                host: host.isEmpty ? "localhost" : host,
+                port: portInt,
+                username: username,
+                authType: authType,
+                privateKeyPath: privateKeyPath.isEmpty ? nil : privateKeyPath,
+                remoteRootPath: remoteRootPath.isEmpty ? "/" : remoteRootPath,
+                autoConnect: autoConnect,
+                isReadOnly: isReadOnly,
+                createdAt: existing.createdAt,
+                lastConnectedAt: existing.lastConnectedAt
+            )
+            viewModel.updateProfile(updated, secret: passwordSecret)
+        } else {
+            let profile = ServerProfile(
+                name: name.isEmpty ? "Server (\(host))" : name,
+                protocolType: protocolType,
+                host: host.isEmpty ? "localhost" : host,
+                port: portInt,
+                username: username,
+                authType: authType,
+                privateKeyPath: privateKeyPath.isEmpty ? nil : privateKeyPath,
+                remoteRootPath: remoteRootPath.isEmpty ? "/" : remoteRootPath,
+                autoConnect: autoConnect,
+                isReadOnly: isReadOnly
+            )
+            viewModel.addProfile(profile, secret: passwordSecret)
+        }
     }
 }

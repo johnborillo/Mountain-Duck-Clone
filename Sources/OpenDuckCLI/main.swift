@@ -843,10 +843,143 @@ struct OpenDuckCLI {
             // Second check must be false (one-time token consumed)
             let isStale = testManager.isSelfInitiatedRemoval(path: victimFile)
             assert(!isStale, "Refused Delete: Token cleanly exhausted to prevent suppression leaks")
-
         } catch {
             assert(false, "Adversarial tests threw unexpected error: \(error)")
         }
+
+        // 8. Delete Sync & Circuit Breaker Journaling Tests
+        print("\n[8/8] Running DeleteSyncAndCircuitBreakerJournalingTests...")
+        do {
+            let deleteAdapter = MockFileSystemAdapter(endpointDescription: "mock://delete.server")
+            try await deleteAdapter.connect()
+
+            let testTempDir = FileManager.default.temporaryDirectory.appendingPathComponent("openduck-cli-deltest-\(UUID().uuidString)")
+            let testCacheDir = testTempDir.appendingPathComponent("cache")
+            let testJournalURL = testTempDir.appendingPathComponent("journal.json")
+            try? FileManager.default.createDirectory(at: testCacheDir, withIntermediateDirectories: true)
+
+            let testEngine = CacheEngine(cacheDirectory: testCacheDir, journalURL: testJournalURL)
+            let testVolumeManager = VolumeMountManager()
+
+            // 8a. Hydration loop prevention
+            testVolumeManager.recordHydratingPath("/Volumes/Test/downloading.dat")
+            let isHydrating = testVolumeManager.isHydratingPath("/Volumes/Test/downloading.dat")
+            assert(isHydrating, "Hydration Loop: Hydrating path token registered and recognized")
+            let isHydratingAgain = testVolumeManager.isHydratingPath("/Volumes/Test/downloading.dat")
+            assert(!isHydratingAgain, "Hydration Loop: Hydrating path token exhausted after inspection")
+
+            // 8b. SQLite Provenance token persistence
+            let crashTestPath = "/Volumes/Test/crash_resilient.txt"
+            testVolumeManager.recordSelfInitiatedRemoval(path: crashTestPath)
+            let persistedTokenExists = MetadataDatabase.shared.consumeSelfInitiatedRemoval(localPath: crashTestPath)
+            assert(persistedTokenExists, "Provenance Persistence: Token stored and consumed from SQLite")
+
+            // 8c. Journaling on delete failure
+            let context = WatcherContext(
+                volumeURL: testTempDir,
+                remoteRootPath: "/",
+                adapter: deleteAdapter,
+                cacheEngine: testEngine,
+                manager: testVolumeManager,
+                isReadOnly: false
+            )
+
+            // Seed file and register in cache
+            deleteAdapter.seedFile(path: "/to_delete.txt", content: "delete me")
+            let entry = RemoteFileEntry(name: "to_delete.txt", path: "/to_delete.txt", size: 9)
+            _ = testEngine.registerPlaceholder(for: entry)
+
+            // Set simulated error to force delete failure
+            deleteAdapter.simulatedError = AdapterError.networkError("Simulated network drop")
+
+            let localVictimFile = testTempDir.appendingPathComponent("to_delete.txt")
+            try "delete me".write(to: localVictimFile, atomically: true, encoding: .utf8)
+            try FileManager.default.removeItem(at: localVictimFile)
+
+            context.handleEvent(localPath: localVictimFile.path, flags: 0x00000200)
+            try await Task.sleep(for: .milliseconds(300))
+
+            let pending = testEngine.journal.pendingEntries()
+            let deleteJournaled = pending.contains { $0.action == .delete && $0.remotePath == "/to_delete.txt" }
+            assert(deleteJournaled, "Delete Resiliency: Failed delete automatically journaled for retry")
+
+            // 8d. Flushed journal retry after network recovery
+            deleteAdapter.simulatedError = nil
+            try await testEngine.syncPendingWrites(with: deleteAdapter)
+            let pendingAfterSync = testEngine.journal.pendingEntries()
+            assert(pendingAfterSync.isEmpty, "Delete Resiliency: Pending delete journal executed and cleared on sync")
+            let statAfterDelete = try? await deleteAdapter.stat(path: "/to_delete.txt")
+            assert(statAfterDelete == nil, "Delete Resiliency: Remote file deleted after journal flush")
+
+            try? FileManager.default.removeItem(at: testTempDir)
+        } catch {
+            assert(false, "Delete sync tests threw unexpected error: \(error)")
+        }
+
+        // --- Suite 9: Connection Editing, Deletion & Transfer Cancellation Tests ---
+        print("\n[9/9] Running ConnectionEditingDeletingAndTransferCancellationTests...")
+        let suiteUserDefaults = UserDefaults(suiteName: "com.openduck.testsuite.\(UUID().uuidString)")!
+        let cmTest = ConnectionManager(keychain: .shared, userDefaults: suiteUserDefaults)
+
+        let initialProfile = ServerProfile(
+            name: "Initial Connection",
+            protocolType: .sftp,
+            host: "sftp1.example.com",
+            port: 22,
+            username: "expedition",
+            remoteRootPath: "/remote"
+        )
+        cmTest.registerProfile(initialProfile)
+        assert(cmTest.allProfiles().contains { $0.id == initialProfile.id }, "ConnectionManager: Registered initial connection profile")
+
+        // 9a. Test profile editing & persistence
+        var editedProfile = initialProfile
+        editedProfile.name = "Renamed Expedition Connection"
+        editedProfile.host = "sftp2.example.com"
+        editedProfile.port = 2222
+        cmTest.updateProfile(editedProfile, secret: "new-secret-token")
+
+        let retrieved = cmTest.profile(for: initialProfile.id)
+        assert(retrieved?.name == "Renamed Expedition Connection", "ConnectionManager: Profile name updated successfully")
+        assert(retrieved?.host == "sftp2.example.com" && retrieved?.port == 2222, "ConnectionManager: Host and port updated successfully")
+
+        // 9b. Test re-instantiation from UserDefaults
+        let cmReinstantiated = ConnectionManager(keychain: .shared, userDefaults: suiteUserDefaults)
+        let loadedFromDisk = cmReinstantiated.profile(for: initialProfile.id)
+        assert(loadedFromDisk?.name == "Renamed Expedition Connection", "ConnectionManager: Profile updates persist across re-instantiation")
+
+        // 9c. Test connection deletion
+        cmTest.deleteProfile(id: initialProfile.id)
+        assert(cmTest.profile(for: initialProfile.id) == nil, "ConnectionManager: Profile deleted from in-memory index")
+        let cmAfterDelete = ConnectionManager(keychain: .shared, userDefaults: suiteUserDefaults)
+        assert(cmAfterDelete.profile(for: initialProfile.id) == nil, "ConnectionManager: Profile deletion persisted to disk")
+
+        // 9d. Test Transfer Cancellation and File Removal
+        let cancelTempDir = FileManager.default.temporaryDirectory.appendingPathComponent("openduck-cancel-test-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: cancelTempDir, withIntermediateDirectories: true)
+        let cancelCacheDir = cancelTempDir.appendingPathComponent("cache")
+        let cancelEngine = CacheEngine(cacheDirectory: cancelCacheDir)
+        let cancelManager = VolumeMountManager()
+        let cancelAdapter = MockFileSystemAdapter()
+
+        let cancelContext = WatcherContext(
+            volumeURL: cancelTempDir,
+            remoteRootPath: "/",
+            adapter: cancelAdapter,
+            cacheEngine: cancelEngine,
+            manager: cancelManager,
+            isReadOnly: false
+        )
+
+        let transferringFile = cancelTempDir.appendingPathComponent("in_flight_file.bin")
+        try? "Binary payload data for cancellation test".write(to: transferringFile, atomically: true, encoding: .utf8)
+        assert(FileManager.default.fileExists(atPath: transferringFile.path), "Transfer Cancellation: Local in-flight file created")
+
+        // Cancel with deleteLocal = true
+        cancelContext.cancelTransfer(remotePath: "/in_flight_file.bin", localURL: transferringFile, deleteLocal: true)
+        assert(!FileManager.default.fileExists(atPath: transferringFile.path), "Transfer Cancellation: Local file successfully removed upon cancel & delete")
+
+        try? FileManager.default.removeItem(at: cancelTempDir)
 
         print("\n===========================================================")
         print("📊 Test Summary: \(passed) Passed, \(failed) Failed (Total: \(passed + failed))")

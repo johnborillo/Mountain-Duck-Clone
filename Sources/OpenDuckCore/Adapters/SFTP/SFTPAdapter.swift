@@ -237,17 +237,47 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             let fileHandle = try FileHandle(forReadingFrom: localURL)
             defer { try? fileHandle.close() }
 
-            let chunkSize = 128 * 1024 // 128 KB streaming chunks
+            let chunkSize = 64 * 1024 // 64 KB chunk
+            let maxConcurrentChunks = 16 // 16 * 64KB = 1 MB in-flight pipelined window
             var offset: UInt64 = 0
 
-            while let chunk = try fileHandle.read(upToCount: chunkSize), !chunk.isEmpty {
-                var buffer = ByteBufferAllocator().buffer(capacity: chunk.count)
-                buffer.writeBytes(chunk)
-                try await stagingFile.write(buffer, at: offset)
-                offset += UInt64(chunk.count)
-                progress?.completedUnitCount = Int64(offset)
+            try await withThrowingTaskGroup(of: Int.self) { group in
+                var inFlight = 0
+                var totalUploaded: Int64 = 0
+
+                while let chunk = try fileHandle.read(upToCount: chunkSize), !chunk.isEmpty {
+                    try Task.checkCancellation()
+
+                    let chunkOffset = offset
+                    let byteCount = chunk.count
+                    offset += UInt64(byteCount)
+
+                    var buffer = ByteBufferAllocator().buffer(capacity: byteCount)
+                    buffer.writeBytes(chunk)
+
+                    group.addTask {
+                        try Task.checkCancellation()
+                        try await stagingFile.write(buffer, at: chunkOffset)
+                        return byteCount
+                    }
+                    inFlight += 1
+
+                    if inFlight >= maxConcurrentChunks {
+                        if let completedBytes = try await group.next() {
+                            inFlight -= 1
+                            totalUploaded += Int64(completedBytes)
+                            progress?.completedUnitCount = totalUploaded
+                        }
+                    }
+                }
+
+                while let completedBytes = try await group.next() {
+                    totalUploaded += Int64(completedBytes)
+                    progress?.completedUnitCount = totalUploaded
+                }
             }
 
+            try Task.checkCancellation()
             try await stagingFile.close()
         } catch {
             try? await stagingFile.close()
@@ -302,12 +332,40 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
         let sftp = try getSFTP()
         let resolved = resolvePath(remotePath)
 
-        // Try file remove, then directory remove
+        // Try file unlink first
         do {
             try await sftp.remove(at: resolved)
+            return
         } catch {
-            try await sftp.rmdir(at: resolved)
+            // Not a regular file — fall through to recursive directory removal
         }
+
+        // Recursive directory deletion: SFTP rmdir requires an empty directory,
+        // so we must list and remove all children depth-first before removing the parent.
+        try await deleteDirectoryRecursive(sftp: sftp, path: resolved)
+    }
+
+    /// Recursively deletes a remote directory by removing all children depth-first,
+    /// then removing the now-empty directory itself.
+    private func deleteDirectoryRecursive(sftp: SFTPClient, path: String) async throws {
+        let children: [RemoteFileEntry]
+        do {
+            children = try await listDirectory(path: path)
+        } catch {
+            // Directory may already be empty or inaccessible — try direct rmdir
+            try await sftp.rmdir(at: path)
+            return
+        }
+
+        for child in children {
+            if child.isDirectory {
+                try await deleteDirectoryRecursive(sftp: sftp, path: child.path)
+            } else {
+                try await sftp.remove(at: child.path)
+            }
+        }
+
+        try await sftp.rmdir(at: path)
     }
 
     public func move(from sourcePath: String, to destinationPath: String) async throws {

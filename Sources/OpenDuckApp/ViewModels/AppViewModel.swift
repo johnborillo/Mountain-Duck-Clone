@@ -16,6 +16,7 @@ public enum AppScreen: Hashable, Sendable {
 public final class AppViewModel: ObservableObject {
     @Published public var currentScreen: AppScreen = .main
     @Published public var profiles: [ServerProfile] = []
+    @Published public var editingProfile: ServerProfile? = nil
     @Published public var mountedDomainIDs: Set<UUID> = []
     @Published public var cacheStats: CacheStatistics = .empty
     @Published public var statusMessage: String? = nil
@@ -77,7 +78,8 @@ public final class AppViewModel: ObservableObject {
                     await unmount(profile: profile)
                 }
             }
-            connectionManager.keychain.deleteSecret(for: id)
+            connectionManager.deleteProfile(id: id)
+            statusMessage = "✓ Connection profile deleted."
             loadProfiles()
         }
     }
@@ -260,5 +262,25 @@ public final class AppViewModel: ObservableObject {
                 activeTransfers.append(progress)
             }
         }
+    }
+
+    public func startEditing(profile: ServerProfile) {
+        self.editingProfile = profile
+        self.currentScreen = .addConnection
+    }
+
+    public func updateProfile(_ profile: ServerProfile, secret: String?) {
+        connectionManager.updateProfile(profile, secret: secret)
+        loadProfiles()
+        self.editingProfile = nil
+        self.currentScreen = .main
+        statusMessage = "✓ Profile '\(profile.name)' updated."
+    }
+
+    public func cancelTransfer(_ transfer: TransferProgress, deleteItem: Bool = false) {
+        let localURL = URL(fileURLWithPath: transfer.remotePath)
+        volumeManager.cancelTransfer(remotePath: transfer.remotePath, localURL: localURL, deleteLocal: deleteItem)
+        activeTransfers.removeAll { $0.id == transfer.id }
+        statusMessage = deleteItem ? "✓ Transfer cancelled and file deleted." : "✓ Transfer cancelled."
     }
 }

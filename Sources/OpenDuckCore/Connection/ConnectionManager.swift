@@ -8,10 +8,14 @@ public final class ConnectionManager: @unchecked Sendable {
     private var activeAdapters: [UUID: RemoteFilesystemAdapter] = [:]
     private var profiles: [UUID: ServerProfile] = [:]
 
+    private static let userDefaultsKey = "com.openduck.serverProfiles"
     public let keychain: KeychainHelper
+    private let userDefaults: UserDefaults
 
-    public init(keychain: KeychainHelper = .shared) {
+    public init(keychain: KeychainHelper = .shared, userDefaults: UserDefaults = .standard) {
         self.keychain = keychain
+        self.userDefaults = userDefaults
+        loadPersistedProfiles()
     }
 
     private func sync<T>(_ body: () throws -> T) rethrows -> T {
@@ -20,10 +24,63 @@ public final class ConnectionManager: @unchecked Sendable {
         return try body()
     }
 
+    private func loadPersistedProfiles() {
+        guard let data = userDefaults.data(forKey: Self.userDefaultsKey),
+              let decoded = try? JSONDecoder().decode([ServerProfile].self, from: data) else {
+            return
+        }
+        sync {
+            for profile in decoded {
+                profiles[profile.id] = profile
+            }
+        }
+    }
+
+    private func saveProfilesToDisk() {
+        let all = sync { Array(profiles.values) }
+        if let data = try? JSONEncoder().encode(all) {
+            userDefaults.set(data, forKey: Self.userDefaultsKey)
+        }
+    }
+
     /// Register a server profile configuration.
     public func registerProfile(_ profile: ServerProfile) {
         sync {
             profiles[profile.id] = profile
+        }
+        saveProfilesToDisk()
+    }
+
+    /// Update an existing server profile and optionally update its keychain secret.
+    public func updateProfile(_ profile: ServerProfile, secret: String? = nil) {
+        sync {
+            profiles[profile.id] = profile
+        }
+        if let secret = secret, !secret.isEmpty {
+            keychain.saveSecret(secret, for: profile.id, account: profile.username)
+        }
+        saveProfilesToDisk()
+    }
+
+    /// Delete a server profile, disconnect any active adapter, and purge credentials.
+    public func deleteProfile(id: UUID) {
+        let adapterToDisconnect: RemoteFilesystemAdapter? = sync {
+            profiles.removeValue(forKey: id)
+            return activeAdapters.removeValue(forKey: id)
+        }
+        if let adapter = adapterToDisconnect {
+            Task {
+                await adapter.disconnect()
+            }
+        }
+        keychain.deleteSecret(for: id)
+        saveProfilesToDisk()
+    }
+
+    /// Retrieve a specific server profile by its unique ID.
+    public func profile(for id: UUID) -> ServerProfile? {
+        sync {
+            profiles[id]
         }
     }
 

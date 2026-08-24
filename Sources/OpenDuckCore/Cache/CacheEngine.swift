@@ -37,6 +37,9 @@ public final class CacheEngine: @unchecked Sendable {
     public let cacheDirectory: URL
     public let evictionPolicy: LRUEvictionPolicy
     public let journal: UploadJournal
+    private var retryTimer: DispatchSourceTimer?
+    private let maxRetryCount = 10
+    private var retryBackoffSeconds: TimeInterval = 5.0
 
     /// Initialize the CacheEngine.
     ///
@@ -230,6 +233,111 @@ public final class CacheEngine: @unchecked Sendable {
             }
             journal.remove(id: op.id)
         }
+    }
+
+    // MARK: - Background Retry Scheduler
+
+    /// Starts a background retry timer that processes pending journal entries with exponential backoff.
+    /// Backoff schedule: 5s → 15s → 45s → 135s (capped at 300s), with ±20% jitter.
+    public func startRetryScheduler(adapter: RemoteFilesystemAdapter) {
+        sync {
+            guard retryTimer == nil else { return }
+            retryBackoffSeconds = 5.0
+        }
+        scheduleNextRetry(adapter: adapter)
+    }
+
+    /// Stops the background retry timer.
+    public func stopRetryScheduler() {
+        sync {
+            retryTimer?.cancel()
+            retryTimer = nil
+        }
+    }
+
+    private func scheduleNextRetry(adapter: RemoteFilesystemAdapter) {
+        let backoff: TimeInterval = sync { retryBackoffSeconds }
+        let jitter = backoff * Double.random(in: -0.2...0.2)
+        let delay = max(1.0, backoff + jitter)
+
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + delay)
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            Task {
+                await self.executeRetry(adapter: adapter)
+            }
+        }
+        sync {
+            retryTimer?.cancel()
+            retryTimer = timer
+        }
+        timer.resume()
+    }
+
+    private func executeRetry(adapter: RemoteFilesystemAdapter) async {
+        let pending = journal.pendingEntries()
+        guard !pending.isEmpty else {
+            // Nothing to retry — reset backoff and reschedule with base interval
+            sync { retryBackoffSeconds = 5.0 }
+            scheduleNextRetry(adapter: adapter)
+            return
+        }
+
+        var allSucceeded = true
+        for op in pending {
+            if op.retryCount >= maxRetryCount {
+                // Mark as permanently failed — leave in journal for UI visibility
+                continue
+            }
+
+            do {
+                switch op.action {
+                case .upload:
+                    if let localURL = op.localFileURL, FileManager.default.fileExists(atPath: localURL.path) {
+                        try await adapter.upload(from: localURL, to: op.remotePath, progress: nil)
+                        sync {
+                            if var entry = index[op.itemIdentifier] {
+                                entry.state = .materialized
+                                entry.remoteModificationDate = Date()
+                                index[op.itemIdentifier] = entry
+                            }
+                        }
+                    }
+                case .createDirectory:
+                    try await adapter.createDirectory(path: op.remotePath)
+                case .delete:
+                    try await adapter.delete(remotePath: op.remotePath)
+                case .move:
+                    if let dest = op.destinationRemotePath {
+                        try await adapter.move(from: op.remotePath, to: dest)
+                    }
+                }
+                journal.remove(id: op.id)
+            } catch {
+                allSucceeded = false
+                // Increment retry count
+                var updated = op
+                updated.retryCount += 1
+                journal.remove(id: op.id)
+                journal.append(updated)
+            }
+        }
+
+        // Adjust backoff: reset on full success, increase on any failure
+        sync {
+            if allSucceeded {
+                retryBackoffSeconds = 5.0
+            } else {
+                retryBackoffSeconds = min(retryBackoffSeconds * 3.0, 300.0)
+            }
+        }
+        scheduleNextRetry(adapter: adapter)
+    }
+
+    /// Returns journal entries that have exceeded the maximum retry count.
+    public func permanentlyFailedEntries() -> [JournalEntry] {
+        return journal.pendingEntries().filter { $0.retryCount >= maxRetryCount }
     }
 
     /// Pin an item so it will never be evicted during cache pressure.
