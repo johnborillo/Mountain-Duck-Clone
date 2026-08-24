@@ -1,9 +1,9 @@
 import Foundation
-import XCTest
+import Testing
 @testable import OpenDuckCore
 
-final class ConnectionManagerTests: XCTestCase {
-    func testProfileRegistrationAndRetrieval() {
+@Suite struct ConnectionManagerTests {
+    @Test func profileRegistrationAndRetrieval() {
         let manager = ConnectionManager()
         let profile = ServerProfile(
             name: "Test SFTP",
@@ -15,10 +15,10 @@ final class ConnectionManagerTests: XCTestCase {
 
         manager.registerProfile(profile)
         let all = manager.allProfiles()
-        XCTAssertTrue(all.contains { $0.id == profile.id })
+        #expect(all.contains { $0.id == profile.id })
     }
 
-    func testMockConnectionLifecycle() async throws {
+    @Test func mockConnectionLifecycle() async throws {
         let manager = ConnectionManager()
         let profile = ServerProfile(
             name: "Mock Server",
@@ -27,13 +27,14 @@ final class ConnectionManagerTests: XCTestCase {
 
         manager.registerProfile(profile)
         let adapter = try await manager.connect(to: profile.id)
-        XCTAssertTrue(adapter.isConnected)
+        #expect(adapter.isConnected)
 
         let active = manager.activeAdapter(for: profile.id)
-        XCTAssertNotNil(active)
-        XCTAssertTrue(active?.isConnected == true)
+        #expect(active != nil)
+        #expect(active?.isConnected == true)
 
         await manager.disconnect(from: profile.id)
-        XCTAssertNil(manager.activeAdapter(for: profile.id))
+        #expect(manager.activeAdapter(for: profile.id) == nil)
     }
 }
+

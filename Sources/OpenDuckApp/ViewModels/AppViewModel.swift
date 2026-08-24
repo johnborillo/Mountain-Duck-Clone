@@ -33,8 +33,11 @@ public final class AppViewModel: ObservableObject {
     ) {
         self.connectionManager = connectionManager
         self.volumeManager = volumeManager
+        // Decoupling Safety Guarantee: The local cache directory MUST be placed in user Caches,
+        // separate from any /Volumes/ path, so cache evictions do not generate FSEvents in mounted volumes.
         let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
             .appendingPathComponent("com.openduck.app/cache")
+        assert(!cacheDir.path.hasPrefix("/Volumes/"), "cacheDir must not reside inside /Volumes")
         self.cacheEngine = cacheEngine ?? CacheEngine(cacheDirectory: cacheDir)
 
         loadInitialData()

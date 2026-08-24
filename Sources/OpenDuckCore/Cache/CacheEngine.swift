@@ -38,11 +38,21 @@ public final class CacheEngine: @unchecked Sendable {
     public let evictionPolicy: LRUEvictionPolicy
     public let journal: UploadJournal
 
+    /// Initialize the CacheEngine.
+    ///
+    /// - Important: Decoupling Safety Guarantee
+    ///   `cacheDirectory` must reside outside of any mounted `/Volumes/<name>` hierarchy.
+    ///   Because evictions remove local files, having the cache inside a watched volume directory
+    ///   would emit FSEvents deletions and inadvertently trigger remote deletions.
     public init(
         cacheDirectory: URL,
         evictionPolicy: LRUEvictionPolicy = LRUEvictionPolicy(),
         journalURL: URL? = nil
     ) {
+        let standardizedPath = cacheDirectory.standardizedFileURL.path
+        assert(!standardizedPath.hasPrefix("/Volumes/"), "CRITICAL SAFETY VIOLATION: cacheDirectory cannot reside inside a mounted /Volumes/ path, as evictions would trigger remote deletions via FSEvents.")
+        precondition(!standardizedPath.hasPrefix("/Volumes/"), "CRITICAL SAFETY VIOLATION: cacheDirectory cannot reside inside /Volumes/")
+
         self.cacheDirectory = cacheDirectory
         self.evictionPolicy = evictionPolicy
         self.journal = UploadJournal(persistenceURL: journalURL)
@@ -252,17 +262,13 @@ public final class CacheEngine: @unchecked Sendable {
     }
 
     /// Purge all unpinned, non-dirty cached files and reset their states to placeholder.
+    /// Pinned items and dirty items (pending write-back) are strictly preserved to prevent data loss.
     public func purgeUnpinned() throws {
         let unpinned: [String] = sync {
             index.values.filter { !$0.isPinned && $0.state != .dirty }.map { $0.itemIdentifier }
         }
         for id in unpinned {
             try? evict(itemIdentifier: id)
-        }
-        if let files = try? FileManager.default.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: nil) {
-            for file in files {
-                try? FileManager.default.removeItem(at: file)
-            }
         }
     }
 

@@ -136,7 +136,6 @@ public struct AddEditConnectionSheet: View {
                             Picker("", selection: $authType) {
                                 Text("Password").tag(AuthenticationType.password)
                                 Text("SSH Key").tag(AuthenticationType.sshKey)
-                                Text("SSH Agent").tag(AuthenticationType.anonymous)
                             }
                             .pickerStyle(.segmented)
 
@@ -172,10 +171,6 @@ public struct AddEditConnectionSheet: View {
                                             .textFieldStyle(.roundedBorder)
                                     }
                                 }
-                            } else {
-                                Text("Will authenticate via running ssh-agent or 1Password agent.")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
                             }
                         }
                         .padding(12)

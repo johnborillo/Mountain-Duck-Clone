@@ -43,7 +43,8 @@ public final class VolumeMountManager: @unchecked Sendable {
     }
 
     /// Mounts a virtual volume at `/Volumes/<name>`.
-    public func mount(name: String, sizeGB: Int = 100, isReadOnly: Bool = false) throws -> URL {
+    /// - Note: Write access is opt-in (`isReadOnly` defaults to `true`) for remote storage safety.
+    public func mount(name: String, sizeGB: Int = 100, isReadOnly: Bool = true) throws -> URL {
         let cleanName = name.replacingOccurrences(of: "/", with: "-")
         try FileManager.default.createDirectory(at: baseStorageDir, withIntermediateDirectories: true)
         let imageURL = baseStorageDir.appendingPathComponent("\(cleanName).dmg.sparseimage")
@@ -422,23 +423,23 @@ public final class VolumeMountManager: @unchecked Sendable {
 
 // MARK: - Watcher Context & Safe Event Dispatcher
 
-private final class WatcherContext {
-    let volumeURL: URL
-    let remoteRootPath: String
-    let adapter: RemoteFilesystemAdapter
-    let cacheEngine: CacheEngine
-    let manager: VolumeMountManager
-    let isReadOnly: Bool
-    let onStatusChange: (@Sendable (String) -> Void)?
+public final class WatcherContext: @unchecked Sendable {
+    public let volumeURL: URL
+    public let remoteRootPath: String
+    public let adapter: RemoteFilesystemAdapter
+    public let cacheEngine: CacheEngine
+    public let manager: VolumeMountManager
+    public let isReadOnly: Bool
+    public let onStatusChange: (@Sendable (String) -> Void)?
 
     private var pendingPaths = Set<String>()
     private var syncDebounceWorkItems: [String: DispatchWorkItem] = [:]
     private var deletionTimestamps: [Date] = []
-    private(set) var isCircuitBreakerTripped: Bool = false
+    public private(set) var isCircuitBreakerTripped: Bool = false
     private var isStopped: Bool = false
     private let lock = NSLock()
 
-    func invalidate() {
+    public func invalidate() {
         lock.lock()
         isStopped = true
         for (_, item) in syncDebounceWorkItems {
@@ -448,14 +449,14 @@ private final class WatcherContext {
         lock.unlock()
     }
 
-    init(
+    public init(
         volumeURL: URL,
         remoteRootPath: String,
         adapter: RemoteFilesystemAdapter,
         cacheEngine: CacheEngine,
         manager: VolumeMountManager,
         isReadOnly: Bool = false,
-        onStatusChange: (@Sendable (String) -> Void)?
+        onStatusChange: (@Sendable (String) -> Void)? = nil
     ) {
         self.volumeURL = volumeURL
         self.remoteRootPath = remoteRootPath
@@ -466,7 +467,7 @@ private final class WatcherContext {
         self.onStatusChange = onStatusChange
     }
 
-    func resetCircuitBreaker() {
+    public func resetCircuitBreaker() {
         lock.lock()
         isCircuitBreakerTripped = false
         deletionTimestamps.removeAll()
@@ -481,25 +482,32 @@ private final class WatcherContext {
         if isCircuitBreakerTripped { return false }
 
         let now = Date()
-        deletionTimestamps = deletionTimestamps.filter { now.timeIntervalSince($0) < 1.0 }
+        // Retain timestamps from the last 60 seconds for dual-window rate monitoring
+        deletionTimestamps = deletionTimestamps.filter { now.timeIntervalSince($0) < 60.0 }
         deletionTimestamps.append(now)
 
-        if deletionTimestamps.count > 10 {
+        let burstDeletions = deletionTimestamps.filter { now.timeIntervalSince($0) < 1.0 }.count
+        let sustainedDeletions = deletionTimestamps.count
+
+        if burstDeletions > 10 || sustainedDeletions > 50 {
             isCircuitBreakerTripped = true
+            let reason = burstDeletions > 10
+                ? "Burst mass deletion (>10 files/sec) paused remote operations."
+                : "Sustained mass deletion (>50 files/60sec) paused remote operations."
             MetadataDatabase.shared.recordDivergenceEvent(
                 volumeName: volumeURL.lastPathComponent,
                 path: "MASS_DELETION_BREAKER",
-                reason: "Mass deletion (>10 files/sec) paused remote operations to protect remote storage."
+                reason: "\(reason) Remote storage protected."
             )
             DispatchQueue.main.async {
-                self.onStatusChange?("⚠️ SAFETY CIRCUIT BREAKER TRIPPED: Mass deletion (>10 files/sec) paused to protect remote storage.")
+                self.onStatusChange?("⚠️ SAFETY CIRCUIT BREAKER TRIPPED: \(reason) Remote storage protected.")
             }
             return false
         }
         return true
     }
 
-    func handleEvent(localPath: String, flags: UInt32) {
+    public func handleEvent(localPath: String, flags: UInt32) {
         let stopped: Bool = lock.withLock { isStopped }
         guard !stopped else { return }
 

@@ -442,6 +442,14 @@ public final class MetadataDatabase: @unchecked Sendable {
 
     // MARK: - Divergence Events (Circuit Breaker & Desync Tracking)
 
+    public struct DivergenceEvent: Sendable, Codable, Identifiable {
+        public let id: String
+        public let volumeName: String
+        public let path: String
+        public let reason: String
+        public let timestamp: Date
+    }
+
     public func recordDivergenceEvent(volumeName: String, path: String, reason: String) {
         let sql = "INSERT INTO divergence_events (id, volume_name, path, reason, timestamp) VALUES (?, ?, ?, ?, ?);"
 
@@ -458,6 +466,36 @@ public final class MetadataDatabase: @unchecked Sendable {
             _ = sqlite3_step(stmt)
         }
         sqlite3_finalize(stmt)
+    }
+
+    public func allDivergenceEvents() -> [DivergenceEvent] {
+        let sql = "SELECT id, volume_name, path, reason, timestamp FROM divergence_events ORDER BY timestamp DESC;"
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        var stmt: OpaquePointer?
+        var events: [DivergenceEvent] = []
+
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let id = String(cString: sqlite3_column_text(stmt, 0))
+                let volumeName = String(cString: sqlite3_column_text(stmt, 1))
+                let path = String(cString: sqlite3_column_text(stmt, 2))
+                let reason = String(cString: sqlite3_column_text(stmt, 3))
+                let timestamp = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4))
+
+                events.append(DivergenceEvent(
+                    id: id,
+                    volumeName: volumeName,
+                    path: path,
+                    reason: reason,
+                    timestamp: timestamp
+                ))
+            }
+        }
+        sqlite3_finalize(stmt)
+        return events
     }
 
     private func parseRecord(from stmt: OpaquePointer?) -> FileRecord? {

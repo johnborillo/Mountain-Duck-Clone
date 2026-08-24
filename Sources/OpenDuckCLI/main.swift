@@ -78,7 +78,7 @@ struct OpenDuckCLI {
 
     static func runLiveSFTPTest(args: [String]) async {
         guard let target = args.first, target.contains("@") else {
-            print("Usage: omd test-sftp <user@host> [--port 22] [--key ~/.ssh/id_ed25519] [--path /]")
+            print("Usage: openduck test-sftp <user@host> [--port 22] [--key ~/.ssh/id_ed25519] [--password <pass>] [--path /]")
             return
         }
 
@@ -88,6 +88,7 @@ struct OpenDuckCLI {
 
         var port = 22
         var keyPath: String? = nil
+        var password: String? = nil
         var remotePath = "/"
 
         var i = 1
@@ -97,6 +98,9 @@ struct OpenDuckCLI {
                 i += 2
             } else if args[i] == "--key" && i + 1 < args.count {
                 keyPath = args[i + 1]
+                i += 2
+            } else if args[i] == "--password" && i + 1 < args.count {
+                password = args[i + 1]
                 i += 2
             } else if args[i] == "--path" && i + 1 < args.count {
                 remotePath = args[i + 1]
@@ -108,7 +112,15 @@ struct OpenDuckCLI {
 
         print("🦆 Testing Live SFTP Connection to \(username)@\(host):\(port)\(remotePath)...")
 
-        let authMethod: SFTPAuthMethod = (keyPath != nil) ? .privateKey(keyPath: keyPath!, passphrase: nil) : .agent
+        let authMethod: SFTPAuthMethod
+        if let pwd = password {
+            authMethod = .password(pwd)
+        } else {
+            let defaultKey = NSString(string: "~/.ssh/id_ed25519").expandingTildeInPath
+            let resolvedKey = keyPath ?? (FileManager.default.fileExists(atPath: defaultKey) ? "~/.ssh/id_ed25519" : "~/.ssh/id_rsa")
+            authMethod = .privateKey(keyPath: resolvedKey, passphrase: nil)
+        }
+
         let config = SFTPConfiguration(
             host: host,
             port: port,
@@ -790,25 +802,34 @@ struct OpenDuckCLI {
         do {
             try await advAdapter.connect()
 
-            // 1. Adversarial filenames: spaces, quotes, wildcards, dashes, emojis
+            // 1. Adversarial filenames: spaces, quotes, wildcards, dashes, emojis, and newlines
             let adversarialNames = [
                 "my document.txt",
                 "say\"hello.txt",
                 "*",
                 "important-*.csv",
                 "-rf.txt",
-                "résumé_🎨.pdf"
+                "résumé_🎨.pdf",
+                "line1\nline2.txt"
             ]
 
             for name in adversarialNames {
                 let path = "/\(name)"
                 advAdapter.seedFile(path: path, content: "Content for \(name)")
                 let stat = try await advAdapter.stat(path: path)
-                assert(stat.name == name && stat.size > 0, "Adversarial Path: Seeded and verified '\(name)'")
-            }
+                assert(stat.name == name && stat.size > 0, "Adversarial Path: Seeded and verified '\(name.replacingOccurrences(of: "\n", with: "\\n"))'")
 
-            let listed = try await advAdapter.listDirectory(path: "/")
-            assert(listed.count == adversarialNames.count, "Adversarial Path: Enumerated all adversarial filenames cleanly")
+                // Test move/rename with adversarial names
+                let renamedPath = "/renamed_\(name)"
+                try await advAdapter.move(from: path, to: renamedPath)
+                let renamedStat = try await advAdapter.stat(path: renamedPath)
+                assert(renamedStat.name == "renamed_\(name)", "Adversarial Path: Renamed '\(name.replacingOccurrences(of: "\n", with: "\\n"))'")
+
+                // Test delete with adversarial names
+                try await advAdapter.delete(remotePath: renamedPath)
+                let deletedStat = try? await advAdapter.stat(path: renamedPath)
+                assert(deletedStat == nil, "Adversarial Path: Deleted '\(name.replacingOccurrences(of: "\n", with: "\\n"))'")
+            }
 
             // 2. Refused-Delete Safeguard: Verify that when OpenDuck marks an eviction, the delete is refused
             let testManager = VolumeMountManager()

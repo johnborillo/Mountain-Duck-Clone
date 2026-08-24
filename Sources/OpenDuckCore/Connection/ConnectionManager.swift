@@ -98,8 +98,6 @@ public final class ConnectionManager: @unchecked Sendable {
                 authMethod = .password(secret)
             case .sshKey:
                 authMethod = .privateKey(keyPath: profile.privateKeyPath ?? "", passphrase: secret.isEmpty ? nil : secret)
-            case .anonymous:
-                authMethod = .agent
             }
 
             let config = SFTPConfiguration(

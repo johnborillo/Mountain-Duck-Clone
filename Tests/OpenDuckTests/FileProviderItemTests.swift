@@ -1,11 +1,11 @@
 import Foundation
-import XCTest
+import Testing
 import FileProvider
 import UniformTypeIdentifiers
 @testable import OpenDuckCore
 
-final class FileProviderItemTests: XCTestCase {
-    func testItemCreationFromEntry() {
+@Suite struct FileProviderItemTests {
+    @Test func itemCreationFromEntry() {
         let entry = RemoteFileEntry(
             name: "document.pdf",
             path: "/books/document.pdf",
@@ -17,17 +17,17 @@ final class FileProviderItemTests: XCTestCase {
         let parentId = NSFileProviderItemIdentifier("parent-folder-id")
         let item = FileProviderItem(from: entry, parentIdentifier: parentId, isDownloaded: true)
 
-        XCTAssertEqual(item.filename, "document.pdf")
-        XCTAssertEqual(item.parentItemIdentifier, parentId)
-        XCTAssertEqual(item.documentSize?.int64Value, 2048)
-        XCTAssertEqual(item.contentType, .pdf)
-        XCTAssertTrue(item.isDownloaded)
-        XCTAssertFalse(item.isDirectory)
-        XCTAssertTrue(item.capabilities.contains(.allowsReading))
-        XCTAssertTrue(item.capabilities.contains(.allowsWriting))
+        #expect(item.filename == "document.pdf")
+        #expect(item.parentItemIdentifier == parentId)
+        #expect(item.documentSize?.int64Value == 2048)
+        #expect(item.contentType == .pdf)
+        #expect(item.isDownloaded)
+        #expect(!item.isDirectory)
+        #expect(item.capabilities.contains(.allowsReading))
+        #expect(item.capabilities.contains(.allowsWriting))
     }
 
-    func testDirectoryItemCapabilities() {
+    @Test func directoryItemCapabilities() {
         let entry = RemoteFileEntry(
             name: "photos",
             path: "/media/photos",
@@ -35,10 +35,11 @@ final class FileProviderItemTests: XCTestCase {
         )
 
         let item = FileProviderItem(from: entry, parentIdentifier: .rootContainer)
-        XCTAssertEqual(item.contentType, .folder)
-        XCTAssertTrue(item.isDirectory)
-        XCTAssertNil(item.documentSize)
-        XCTAssertTrue(item.capabilities.contains(.allowsAddingSubItems))
-        XCTAssertTrue(item.capabilities.contains(.allowsContentEnumerating))
+        #expect(item.contentType == .folder)
+        #expect(item.isDirectory)
+        #expect(item.documentSize == nil)
+        #expect(item.capabilities.contains(.allowsAddingSubItems))
+        #expect(item.capabilities.contains(.allowsContentEnumerating))
     }
 }
+

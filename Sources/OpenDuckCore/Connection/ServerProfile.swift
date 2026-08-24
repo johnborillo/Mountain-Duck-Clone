@@ -12,7 +12,6 @@ public enum RemoteProtocol: String, Codable, Sendable, CaseIterable {
 public enum AuthenticationType: String, Codable, Sendable {
     case password
     case sshKey
-    case anonymous
 }
 
 /// Persistent profile describing a remote server configuration.

@@ -8,7 +8,6 @@ import Crypto
 public enum SFTPAuthMethod: Sendable {
     case password(String)
     case privateKey(keyPath: String, passphrase: String?)
-    case agent
 }
 
 /// Configuration parameters for an SFTP remote endpoint.
@@ -24,7 +23,7 @@ public struct SFTPConfiguration: Sendable {
         host: String,
         port: Int = 22,
         username: String,
-        authMethod: SFTPAuthMethod = .agent,
+        authMethod: SFTPAuthMethod,
         rootPath: String = "/",
         connectionTimeout: TimeInterval = 15.0
     ) {
@@ -83,8 +82,6 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             } else {
                 throw AdapterError.authenticationFailed("Invalid private key format at '\(expandedPath)'")
             }
-        case .agent:
-            authMethod = .passwordBased(username: configuration.username, password: "")
         }
 
         let validator = OpenDuckHostKeyValidator(

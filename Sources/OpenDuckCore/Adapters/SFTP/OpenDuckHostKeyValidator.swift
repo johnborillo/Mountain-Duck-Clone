@@ -20,9 +20,29 @@ public final class OpenDuckHostKeyValidator: NIOSSHClientServerAuthenticationDel
     public let host: String
     public let port: Int
     public let onPin: (@Sendable (String) -> Void)?
-    public private(set) var validatedFingerprint: String?
-    public private(set) var mismatchDetected: Bool = false
-    public private(set) var expectedFingerprint: String?
+
+    private let lock = NSLock()
+    private var _validatedFingerprint: String?
+    private var _mismatchDetected: Bool = false
+    private var _expectedFingerprint: String?
+
+    public var validatedFingerprint: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _validatedFingerprint
+    }
+
+    public var mismatchDetected: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _mismatchDetected
+    }
+
+    public var expectedFingerprint: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _expectedFingerprint
+    }
 
     public init(host: String, port: Int, onPin: (@Sendable (String) -> Void)? = nil) {
         self.host = host
@@ -36,12 +56,19 @@ public final class OpenDuckHostKeyValidator: NIOSSHClientServerAuthenticationDel
     ) {
         let openSSHKey = String(openSSHPublicKey: hostKey)
         let parts = openSSHKey.split(separator: " ")
+        guard parts.count > 1, let rawData = Data(base64Encoded: String(parts[1])) else {
+            validationCompletePromise.fail(AdapterError.authenticationFailed("Malformed or unparseable host key for \(host):\(port)"))
+            return
+        }
+
         let keyType = parts.first.map(String.init) ?? "unknown"
-        let b64 = parts.count > 1 ? String(parts[1]) : ""
-        let rawData = Data(base64Encoded: b64) ?? Data(openSSHKey.utf8)
         let hash = SHA256.hash(data: rawData)
-        let fingerprint = "SHA256:" + Data(hash).base64EncodedString()
-        self.validatedFingerprint = fingerprint
+        // Standard OpenSSH format: SHA256 base64 digest with trailing '=' padding removed
+        let fingerprint = "SHA256:" + Data(hash).base64EncodedString().replacingOccurrences(of: "=", with: "")
+
+        lock.lock()
+        _validatedFingerprint = fingerprint
+        lock.unlock()
 
         let existingPinned = MetadataDatabase.shared.pinnedFingerprint(forHost: host, port: port)
 
@@ -51,8 +78,11 @@ public final class OpenDuckHostKeyValidator: NIOSSHClientServerAuthenticationDel
                 validationCompletePromise.succeed(())
             } else {
                 // Host key mismatch! Possible MITM attack -> Reject immediately
-                self.mismatchDetected = true
-                self.expectedFingerprint = pinned
+                lock.lock()
+                _mismatchDetected = true
+                _expectedFingerprint = pinned
+                lock.unlock()
+
                 print("🛑 [OpenDuck Security] HOST KEY MISMATCH for \(host):\(port)!")
                 print("   Expected pinned: \(pinned)")
                 print("   Presented key:   \(fingerprint)")
