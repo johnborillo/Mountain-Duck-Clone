@@ -1,0 +1,43 @@
+# ==============================================================================
+# OpenMountainDuck .gitignore
+# ==============================================================================
+
+# --- Swift Package Manager & Build Artifacts ---
+.build/
+build/
+DerivedData/
+*.dSYM/
+*.app/
+*.appex/
+
+# --- macOS System Files ---
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Icon\r\r
+
+# --- Xcode & Developer Metadata ---
+*.xcuserstate
+project.xcworkspace/xcuserdata/
+*.xcuserdata/
+xcuserdata/
+
+# --- Secrets, Keys & Environment Variables ---
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.cer
+*.mobileprovision
+id_rsa
+id_ed25519
+
+# --- Temporary & Scratch Files ---
+*.swp
+*~
+*.log
+
