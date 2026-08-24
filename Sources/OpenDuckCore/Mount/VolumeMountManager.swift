@@ -1,12 +1,15 @@
 import Foundation
 
 /// Manages native macOS virtual volumes mounted under `/Volumes/<ProfileName>`.
-/// Appears directly under Finder sidebar "Locations" as a first-class native volume.
+/// Uses lazy on-demand directory population via FSEvents — only lists the folder
+/// the user is currently looking at in Finder, and never pre-downloads file contents.
 public final class VolumeMountManager: @unchecked Sendable {
     public static let shared = VolumeMountManager()
 
     private let lock = NSLock()
     private var mountedVolumes: [String: URL] = [:]
+    private var populatedDirs: Set<String> = []
+    private var activeStreams: [String: FSEventStreamRef] = [:]
     private let baseStorageDir: URL
 
     public init() {
@@ -16,6 +19,7 @@ public final class VolumeMountManager: @unchecked Sendable {
         try? FileManager.default.createDirectory(at: baseStorageDir, withIntermediateDirectories: true)
     }
 
+    @discardableResult
     private func sync<T>(_ body: () throws -> T) rethrows -> T {
         lock.lock()
         defer { lock.unlock() }
@@ -28,7 +32,6 @@ public final class VolumeMountManager: @unchecked Sendable {
         let mountPoint = URL(fileURLWithPath: "/Volumes/\(cleanName)")
         let imageURL = baseStorageDir.appendingPathComponent("\(cleanName).dmg.sparseimage")
 
-        // 1. Create sparse image if it does not exist
         if !FileManager.default.fileExists(atPath: imageURL.path) {
             let createProcess = Process()
             createProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
@@ -44,25 +47,15 @@ public final class VolumeMountManager: @unchecked Sendable {
             createProcess.waitUntilExit()
         }
 
-        // 2. Detach if previously attached
         _ = try? unmount(name: cleanName)
 
-        // 3. Attach image at /Volumes/<name>
         let attachProcess = Process()
         attachProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
-        attachProcess.arguments = [
-            "attach",
-            imageURL.path,
-            "-mountpoint", mountPoint.path
-        ]
-
-        let pipe = Pipe()
-        attachProcess.standardError = pipe
+        attachProcess.arguments = ["attach", imageURL.path, "-mountpoint", mountPoint.path]
         try attachProcess.run()
         attachProcess.waitUntilExit()
 
         if !FileManager.default.fileExists(atPath: mountPoint.path) {
-            // Fallback: mount without explicit mountpoint
             let fallbackProcess = Process()
             fallbackProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
             fallbackProcess.arguments = ["attach", imageURL.path]
@@ -72,53 +65,51 @@ public final class VolumeMountManager: @unchecked Sendable {
 
         sync {
             mountedVolumes[cleanName] = mountPoint
+            populatedDirs.removeAll()
         }
 
         return mountPoint
     }
 
-    /// Unmounts and detaches the virtual volume from `/Volumes/<name>`.
+    /// Unmounts and detaches the virtual volume.
     public func unmount(name: String) throws {
         let cleanName = name.replacingOccurrences(of: "/", with: "-")
-        let mountPoint = "/Volumes/\(cleanName)"
+        stopWatching(name: cleanName)
 
         let detachProcess = Process()
         detachProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
-        detachProcess.arguments = [
-            "detach",
-            mountPoint,
-            "-force"
-        ]
+        detachProcess.arguments = ["detach", "/Volumes/\(cleanName)", "-force"]
         try detachProcess.run()
         detachProcess.waitUntilExit()
 
         sync {
             _ = mountedVolumes.removeValue(forKey: cleanName)
+            populatedDirs.removeAll()
         }
     }
 
     public func isMounted(name: String) -> Bool {
         let cleanName = name.replacingOccurrences(of: "/", with: "-")
-        let mountPoint = "/Volumes/\(cleanName)"
-        return FileManager.default.fileExists(atPath: mountPoint)
+        return FileManager.default.fileExists(atPath: "/Volumes/\(cleanName)")
     }
 
-    /// Recursively synchronizes remote directory tree to local volume up to `maxDepth`.
-    public func syncTree(
+    // MARK: - Lazy Directory Population
+
+    /// Performs a single-level listing of a remote directory and creates local stubs.
+    /// Directories become real empty directories; files become zero-byte placeholders.
+    /// NO file content is downloaded. NO recursion.
+    public func populateDirectory(
         adapter: RemoteFilesystemAdapter,
         remotePath: String,
         localURL: URL,
-        cacheEngine: CacheEngine,
-        currentDepth: Int = 0,
-        maxDepth: Int = 4,
-        onProgress: (@Sendable (String) -> Void)? = nil
-    ) async throws {
-        guard currentDepth <= maxDepth else { return }
+        cacheEngine: CacheEngine
+    ) async throws -> [RemoteFileEntry] {
+        let alreadyPopulated: Bool = sync { populatedDirs.contains(remotePath) }
+        if alreadyPopulated { return [] }
 
         try FileManager.default.createDirectory(at: localURL, withIntermediateDirectories: true)
 
         let items = try await adapter.listDirectory(path: remotePath)
-        onProgress?("Syncing \(remotePath) (\(items.count) items)...")
 
         for item in items {
             let localItemURL = localURL.appendingPathComponent(item.name)
@@ -126,21 +117,167 @@ public final class VolumeMountManager: @unchecked Sendable {
 
             if item.isDirectory {
                 try? FileManager.default.createDirectory(at: localItemURL, withIntermediateDirectories: true)
-                // Recurse into child subfolder
-                try await syncTree(
-                    adapter: adapter,
-                    remotePath: item.path,
-                    localURL: localItemURL,
-                    cacheEngine: cacheEngine,
-                    currentDepth: currentDepth + 1,
-                    maxDepth: maxDepth,
-                    onProgress: onProgress
-                )
             } else {
                 if !FileManager.default.fileExists(atPath: localItemURL.path) {
-                    try? await adapter.download(remotePath: item.path, to: localItemURL, progress: nil)
+                    FileManager.default.createFile(atPath: localItemURL.path, contents: nil)
                 }
             }
+        }
+
+        sync { populatedDirs.insert(remotePath) }
+        return items
+    }
+
+    /// Check if a remote directory has been populated locally.
+    public func isPopulated(remotePath: String) -> Bool {
+        sync { populatedDirs.contains(remotePath) }
+    }
+
+    /// Reset populated state for a directory (forces re-listing on next access).
+    public func invalidateDirectory(remotePath: String) {
+        sync { populatedDirs.remove(remotePath) }
+    }
+
+    // MARK: - FSEvents Directory Watcher
+
+    /// Starts watching the volume for directory access events.
+    /// When Finder opens a subdirectory, we lazily populate it from the remote server.
+    public func startWatching(
+        name: String,
+        volumeURL: URL,
+        remoteRootPath: String,
+        adapter: RemoteFilesystemAdapter,
+        cacheEngine: CacheEngine
+    ) {
+        let cleanName = name.replacingOccurrences(of: "/", with: "-")
+        stopWatching(name: cleanName)
+
+        let context = WatcherContext(
+            volumeURL: volumeURL,
+            remoteRootPath: remoteRootPath,
+            adapter: adapter,
+            cacheEngine: cacheEngine,
+            manager: self
+        )
+        let contextPtr = Unmanaged.passRetained(context).toOpaque()
+
+        var streamContext = FSEventStreamContext(
+            version: 0,
+            info: contextPtr,
+            retain: nil,
+            release: nil,
+            copyDescription: nil
+        )
+
+        let pathsToWatch = [volumeURL.path] as CFArray
+        let stream = FSEventStreamCreate(
+            nil,
+            fsEventsCallback,
+            &streamContext,
+            pathsToWatch,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            0.3,
+            UInt32(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents)
+        )!
+
+        FSEventStreamSetDispatchQueue(stream, DispatchQueue.main)
+        FSEventStreamStart(stream)
+
+        sync { activeStreams[cleanName] = stream }
+    }
+
+    public func stopWatching(name: String) {
+        let cleanName = name.replacingOccurrences(of: "/", with: "-")
+        let stream: FSEventStreamRef? = sync { activeStreams.removeValue(forKey: cleanName) }
+        if let stream = stream {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+        }
+    }
+}
+
+// MARK: - FSEvents Callback & Watcher Context
+
+private final class WatcherContext {
+    let volumeURL: URL
+    let remoteRootPath: String
+    let adapter: RemoteFilesystemAdapter
+    let cacheEngine: CacheEngine
+    let manager: VolumeMountManager
+    private var pendingPaths = Set<String>()
+    private let lock = NSLock()
+
+    init(volumeURL: URL, remoteRootPath: String, adapter: RemoteFilesystemAdapter, cacheEngine: CacheEngine, manager: VolumeMountManager) {
+        self.volumeURL = volumeURL
+        self.remoteRootPath = remoteRootPath
+        self.adapter = adapter
+        self.cacheEngine = cacheEngine
+        self.manager = manager
+    }
+
+    func handleDirectoryAccess(localPath: String) {
+        let volumePath = volumeURL.path
+        guard localPath.hasPrefix(volumePath) else { return }
+
+        var relativePath = String(localPath.dropFirst(volumePath.count))
+        if relativePath.isEmpty { relativePath = "/" }
+        if !relativePath.hasPrefix("/") { relativePath = "/" + relativePath }
+
+        let remotePath: String
+        if remoteRootPath == "/" {
+            remotePath = relativePath
+        } else if relativePath == "/" {
+            remotePath = remoteRootPath
+        } else {
+            remotePath = remoteRootPath + relativePath
+        }
+
+        let shouldProcess: Bool = lock.withLock {
+            if pendingPaths.contains(remotePath) { return false }
+            pendingPaths.insert(remotePath)
+            return true
+        }
+        guard shouldProcess else { return }
+
+        guard !manager.isPopulated(remotePath: remotePath) else {
+            lock.withLock { _ = pendingPaths.remove(remotePath) }
+            return
+        }
+
+        let localURL = URL(fileURLWithPath: localPath)
+
+        Task {
+            defer { self.lock.withLock { _ = self.pendingPaths.remove(remotePath) } }
+            _ = try? await self.manager.populateDirectory(
+                adapter: self.adapter,
+                remotePath: remotePath,
+                localURL: localURL,
+                cacheEngine: self.cacheEngine
+            )
+        }
+    }
+}
+
+private func fsEventsCallback(
+    streamRef: ConstFSEventStreamRef,
+    clientCallBackInfo: UnsafeMutableRawPointer?,
+    numEvents: Int,
+    eventPaths: UnsafeMutableRawPointer,
+    eventFlags: UnsafePointer<FSEventStreamEventFlags>,
+    eventIds: UnsafePointer<FSEventStreamEventId>
+) {
+    guard let contextPtr = clientCallBackInfo else { return }
+    let context = Unmanaged<WatcherContext>.fromOpaque(contextPtr).takeUnretainedValue()
+
+    let paths = unsafeBitCast(eventPaths, to: NSArray.self)
+    for i in 0..<numEvents {
+        let flags = eventFlags[i]
+        guard let path = paths[i] as? String else { continue }
+
+        let isDir = (flags & UInt32(kFSEventStreamEventFlagItemIsDir)) != 0
+        if isDir {
+            context.handleDirectoryAccess(localPath: path)
         }
     }
 }

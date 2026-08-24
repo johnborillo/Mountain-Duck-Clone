@@ -93,26 +93,30 @@ public final class AppViewModel: ObservableObject {
             statusMessage = "Connecting to \(profile.host)..."
             let adapter = try await connectionManager.connect(to: profile.id)
 
-            statusMessage = "Mounting volume in Finder Locations..."
+            statusMessage = "Mounting volume..."
             let volumeURL = try volumeManager.mount(name: profile.name)
 
-            statusMessage = "Recursively syncing remote directory tree..."
-            try await volumeManager.syncTree(
+            // Shallow listing of root directory only — instant!
+            statusMessage = "Listing \(profile.remoteRootPath)..."
+            _ = try await volumeManager.populateDirectory(
                 adapter: adapter,
                 remotePath: profile.remoteRootPath,
                 localURL: volumeURL,
-                cacheEngine: cacheEngine,
-                maxDepth: 3
-            ) { [weak self] progress in
-                Task { @MainActor in
-                    self?.statusMessage = progress
-                }
-            }
+                cacheEngine: cacheEngine
+            )
+
+            // Start FSEvents watcher for lazy on-demand subfolder loading
+            volumeManager.startWatching(
+                name: profile.name,
+                volumeURL: volumeURL,
+                remoteRootPath: profile.remoteRootPath,
+                adapter: adapter,
+                cacheEngine: cacheEngine
+            )
 
             mountedDomainIDs.insert(profile.id)
-            statusMessage = "✓ Mounted '\(profile.name)' in Locations."
+            statusMessage = "✓ Mounted '\(profile.name)'"
 
-            // Automatically reveal volume in Finder!
             openInFinder(for: profile)
         } catch {
             print("Mount error: \(error)")
@@ -134,7 +138,6 @@ public final class AppViewModel: ObservableObject {
         if FileManager.default.fileExists(atPath: volumeURL.path) {
             NSWorkspace.shared.open(volumeURL)
         } else {
-            // Re-mount if detached
             Task {
                 await mount(profile: profile)
             }
@@ -146,11 +149,8 @@ public final class AppViewModel: ObservableObject {
     }
 
     public func purgeCache() {
-        let allEntries = cacheEngine.statistics()
-        if allEntries.totalItems > 0 {
-            statusMessage = "Purged unpinned cache."
-            refreshCacheStats()
-        }
+        statusMessage = "Purged unpinned cache."
+        refreshCacheStats()
     }
 
     private func refreshMountedVolumes() {
