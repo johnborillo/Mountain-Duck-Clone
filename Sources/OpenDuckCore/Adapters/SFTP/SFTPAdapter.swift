@@ -73,12 +73,12 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
                 let decKey = passphrase?.data(using: .utf8)
                 if let privKey = try? Curve25519.Signing.PrivateKey(sshEd25519: keyString, decryptionKey: decKey) {
                     authMethod = .ed25519(username: configuration.username, privateKey: privKey)
-                } else if let rsaKey = try? Insecure.RSA.PrivateKey(sshRsa: keyString) {
+                } else if let rsaKey = try? Insecure.RSA.PrivateKey(sshRsa: keyString, decryptionKey: decKey) {
                     authMethod = .rsa(username: configuration.username, privateKey: rsaKey)
                 } else if let rawKey = try? Curve25519.Signing.PrivateKey(rawRepresentation: keyData) {
                     authMethod = .ed25519(username: configuration.username, privateKey: rawKey)
                 } else {
-                    authMethod = .passwordBased(username: configuration.username, password: "")
+                    throw AdapterError.authenticationFailed("Failed to parse or decrypt private key at '\(expandedPath)'. If passphrase-protected, ensure the correct passphrase is provided.")
                 }
             } else {
                 throw AdapterError.authenticationFailed("Invalid private key format at '\(expandedPath)'")
@@ -87,12 +87,17 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             authMethod = .passwordBased(username: configuration.username, password: "")
         }
 
+        let validator = OpenDuckHostKeyValidator(
+            host: configuration.host,
+            port: configuration.port
+        )
+
         do {
             let client = try await SSHClient.connect(
                 host: configuration.host,
                 port: configuration.port,
                 authenticationMethod: authMethod,
-                hostKeyValidator: .acceptAnything(),
+                hostKeyValidator: .custom(validator),
                 reconnect: .never,
                 connectTimeout: .seconds(Int64(configuration.connectionTimeout))
             )
@@ -103,6 +108,11 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
                 self.sftpClient = sftp
             }
         } catch {
+            if validator.mismatchDetected {
+                let exp = validator.expectedFingerprint ?? "unknown"
+                let rcv = validator.validatedFingerprint ?? "unknown"
+                throw AdapterError.authenticationFailed("HOST KEY VERIFICATION FAILED: Remote host key mismatch for \(configuration.host):\(configuration.port)!\nExpected: \(exp)\nReceived: \(rcv)\nPossible Man-In-The-Middle attack or server key changed.")
+            }
             throw AdapterError.authenticationFailed("SFTP connection failed: \(error.localizedDescription)")
         }
     }

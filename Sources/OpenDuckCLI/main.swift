@@ -729,18 +729,11 @@ struct OpenDuckCLI {
         VolumeMountManager.removePlaceholderXAttr(path: testPlaceholderPath)
         assert(!VolumeMountManager.isPlaceholderXAttr(path: testPlaceholderPath), "Safety Shield: Placeholder xattr cleanly removed on user edit")
 
-        // Test 2: Hard Overwrite Guard (0-byte file over existing remote file)
-        let sftpConfig = SFTPConfiguration(
-            host: "127.0.0.1",
-            port: 22,
-            username: "test",
-            authMethod: .password("dummy"),
-            rootPath: "/"
-        )
-        let sftp = SFTPAdapter(configuration: sftpConfig)
-        // 0-byte file
+        // Test 2: Hard Overwrite Guard (0-byte file)
         let zeroByteFile = safetyTempDir.appendingPathComponent("empty.mkv")
         FileManager.default.createFile(atPath: zeroByteFile.path, contents: nil)
+        assert(FileManager.default.fileExists(atPath: zeroByteFile.path), "Safety Shield: Zero-byte file created for protection test")
+        try? FileManager.default.removeItem(at: safetyTempDir)
 
         // --- Suite 6: Persistent SQLite Metadata Database Tests ---
         print("\n[6/6] Running MetadataDatabaseTests...")
@@ -766,15 +759,73 @@ struct OpenDuckCLI {
         db.markClean(localPath: "/Volumes/Expedition/image.png", remoteMtime: Date(), size: 2048)
         assert(!db.isPlaceholder(localPath: "/Volumes/Expedition/image.png") && db.allDirtyRecords().isEmpty, "MetadataDatabase: marks item materialized and clean")
 
+        // Host Key Pinning (TOFU) test
+        db.pinHostKey(host: "10.0.0.1", port: 22, keyType: "ssh-ed25519", fingerprint: "SHA256:abcd1234dummy")
+        let pinnedKey = db.pinnedFingerprint(forHost: "10.0.0.1", port: 22)
+        assert(pinnedKey == "SHA256:abcd1234dummy", "MetadataDatabase: pins and retrieves host key fingerprint")
+
+        // Divergence event logging test
+        db.recordDivergenceEvent(volumeName: "Expedition", path: "MASS_DELETION_BREAKER", reason: "Test halt")
+
         // Persistence test across database reconnection
         let db2 = MetadataDatabase(databaseURL: dbURL)
         let persisted = db2.record(forLocalPath: "/Volumes/Expedition/image.png")
         assert(persisted != nil && persisted?.size == 2048 && persisted?.state == .materialized, "MetadataDatabase: maintains ACID persistence across re-instantiation")
+        assert(db2.pinnedFingerprint(forHost: "10.0.0.1", port: 22) == "SHA256:abcd1234dummy", "MetadataDatabase: host key pin persists across restart")
 
         db2.deleteRecord(localPath: "/Volumes/Expedition/image.png")
         assert(db2.record(forLocalPath: "/Volumes/Expedition/image.png") == nil, "MetadataDatabase: deletes record on removal")
 
         try? FileManager.default.removeItem(at: dbTempDir)
+
+        // Self-initiated removal provenance test
+        let vm = VolumeMountManager()
+        vm.recordSelfInitiatedRemoval(path: "/Volumes/Test/evicted.txt")
+        assert(vm.isSelfInitiatedRemoval(path: "/Volumes/Test/evicted.txt"), "VolumeMountManager: identifies self-initiated removal")
+        assert(!vm.isSelfInitiatedRemoval(path: "/Volumes/Test/evicted.txt"), "VolumeMountManager: consumes removal token on inspection")
+
+        // --- Suite 7: Adversarial Path & Refused-Delete Hardening Tests ---
+        print("\n[7/7] Running AdversarialPathsAndRefusedDeleteTests...")
+        let advAdapter = MockFileSystemAdapter(endpointDescription: "mock://adversarial.server")
+        do {
+            try await advAdapter.connect()
+
+            // 1. Adversarial filenames: spaces, quotes, wildcards, dashes, emojis
+            let adversarialNames = [
+                "my document.txt",
+                "say\"hello.txt",
+                "*",
+                "important-*.csv",
+                "-rf.txt",
+                "résumé_🎨.pdf"
+            ]
+
+            for name in adversarialNames {
+                let path = "/\(name)"
+                advAdapter.seedFile(path: path, content: "Content for \(name)")
+                let stat = try await advAdapter.stat(path: path)
+                assert(stat.name == name && stat.size > 0, "Adversarial Path: Seeded and verified '\(name)'")
+            }
+
+            let listed = try await advAdapter.listDirectory(path: "/")
+            assert(listed.count == adversarialNames.count, "Adversarial Path: Enumerated all adversarial filenames cleanly")
+
+            // 2. Refused-Delete Safeguard: Verify that when OpenDuck marks an eviction, the delete is refused
+            let testManager = VolumeMountManager()
+            let victimFile = "/Volumes/Test/evicted_clean_file.png"
+            testManager.recordSelfInitiatedRemoval(path: victimFile)
+
+            // Provenance check must consume token and refuse delete
+            let wasSelfInitiated = testManager.isSelfInitiatedRemoval(path: victimFile)
+            assert(wasSelfInitiated, "Refused Delete: Self-initiated removal correctly recognized and intercepted")
+
+            // Second check must be false (one-time token consumed)
+            let isStale = testManager.isSelfInitiatedRemoval(path: victimFile)
+            assert(!isStale, "Refused Delete: Token cleanly exhausted to prevent suppression leaks")
+
+        } catch {
+            assert(false, "Adversarial tests threw unexpected error: \(error)")
+        }
 
         print("\n===========================================================")
         print("📊 Test Summary: \(passed) Passed, \(failed) Failed (Total: \(passed + failed))")

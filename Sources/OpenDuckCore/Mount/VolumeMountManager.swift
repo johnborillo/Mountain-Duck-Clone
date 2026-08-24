@@ -13,7 +13,7 @@ public final class VolumeMountManager: @unchecked Sendable {
     private let lock = NSLock()
     private var mountedVolumes: [String: URL] = [:]
     private var populatedDirs: Set<String> = []
-    private var knownPlaceholders: Set<String> = [] // Full local paths of OpenDuck-generated placeholders
+    private var selfInitiatedRemovals: Set<String> = [] // Local paths removed intentionally by OpenDuck (eviction, reconcile)
     private var activeStreams: [String: FSEventStreamRef] = [:]
     private var activeContexts: [String: WatcherContext] = [:]
     private let baseStorageDir: URL
@@ -25,6 +25,14 @@ public final class VolumeMountManager: @unchecked Sendable {
             .appendingPathComponent("OpenDuck/Volumes")
         self.baseStorageDir = appSupport
         try? FileManager.default.createDirectory(at: baseStorageDir, withIntermediateDirectories: true)
+    }
+
+    public func recordSelfInitiatedRemoval(path: String) {
+        sync { selfInitiatedRemovals.insert(path) }
+    }
+
+    public func isSelfInitiatedRemoval(path: String) -> Bool {
+        sync { selfInitiatedRemovals.remove(path) != nil }
     }
 
     @discardableResult
@@ -101,7 +109,6 @@ public final class VolumeMountManager: @unchecked Sendable {
         sync {
             mountedVolumes[cleanName] = resolvedMountURL
             populatedDirs.removeAll()
-            knownPlaceholders.removeAll()
         }
 
         return resolvedMountURL
@@ -121,7 +128,6 @@ public final class VolumeMountManager: @unchecked Sendable {
         sync {
             _ = mountedVolumes.removeValue(forKey: cleanName)
             populatedDirs.removeAll()
-            knownPlaceholders.removeAll()
         }
     }
 
@@ -133,7 +139,7 @@ public final class VolumeMountManager: @unchecked Sendable {
     // MARK: - Safe Lazy Directory Population
 
     /// Performs a single-level listing of a remote directory and creates local stubs.
-    /// Placeholders are tagged with `com.openduck.placeholder` xattr and registered in `knownPlaceholders`.
+    /// Placeholders are registered persistently in `MetadataDatabase`.
     /// When forceRefresh is true, synchronizes remote deletions by pruning removed placeholders.
     /// When isReadOnly is true, locks folder and files to native read-only permissions (555 / 444).
     public func populateDirectory(
@@ -177,7 +183,6 @@ public final class VolumeMountManager: @unchecked Sendable {
                         }
                     }
                     Self.setPlaceholderXAttr(path: localItemURL.path)
-                    sync { knownPlaceholders.insert(localItemURL.path) }
                     MetadataDatabase.shared.markPlaceholder(
                         localPath: localItemURL.path,
                         remotePath: item.path,
@@ -208,9 +213,9 @@ public final class VolumeMountManager: @unchecked Sendable {
                     let isDirty = cacheEngine.entry(for: itemId)?.isDirty ?? false
 
                     if !isDirty {
+                        recordSelfInitiatedRemoval(path: localItemURL.path)
                         try? FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: localItemURL.path)
                         try? FileManager.default.removeItem(at: localItemURL)
-                        sync { knownPlaceholders.remove(localItemURL.path) }
                         MetadataDatabase.shared.deleteRecord(localPath: localItemURL.path)
                         try? cacheEngine.evict(itemIdentifier: itemId)
                     }
@@ -230,7 +235,7 @@ public final class VolumeMountManager: @unchecked Sendable {
             guard let self = self, let cacheEngine = cacheEngine else { return }
             for item in remoteItems where !item.isDirectory {
                 let localItemURL = localURL.appendingPathComponent(item.name)
-                if VolumeMountManager.isPlaceholderXAttr(path: localItemURL.path) || self.isPlaceholder(path: localItemURL.path) {
+                if self.isPlaceholder(path: localItemURL.path) {
                     try? await self.hydrateFile(
                         localPath: localItemURL.path,
                         remotePath: item.path,
@@ -250,15 +255,12 @@ public final class VolumeMountManager: @unchecked Sendable {
     }
 
     public func isPlaceholder(path: String) -> Bool {
-        if MetadataDatabase.shared.isPlaceholder(localPath: path) {
-            return true
-        }
-        return sync { knownPlaceholders.contains(path) } || Self.isPlaceholderXAttr(path: path)
+        return MetadataDatabase.shared.isPlaceholder(localPath: path)
     }
 
     public func removePlaceholder(path: String) {
-        sync { knownPlaceholders.remove(path) }
         MetadataDatabase.shared.markMaterialized(localPath: path)
+        Self.removePlaceholderXAttr(path: path)
     }
 
     public func markPopulated(remotePath: String) {
@@ -484,6 +486,11 @@ private final class WatcherContext {
 
         if deletionTimestamps.count > 10 {
             isCircuitBreakerTripped = true
+            MetadataDatabase.shared.recordDivergenceEvent(
+                volumeName: volumeURL.lastPathComponent,
+                path: "MASS_DELETION_BREAKER",
+                reason: "Mass deletion (>10 files/sec) paused remote operations to protect remote storage."
+            )
             DispatchQueue.main.async {
                 self.onStatusChange?("⚠️ SAFETY CIRCUIT BREAKER TRIPPED: Mass deletion (>10 files/sec) paused to protect remote storage.")
             }
@@ -641,6 +648,11 @@ private final class WatcherContext {
             // Case 3: File Deleted or Moved to Trash in Finder -> Delete from Remote SFTP Server
             if isReadOnly {
                 return
+            }
+
+            // PROVENANCE GUARD: Check if OpenDuck initiated this local removal (reconciliation, eviction, etc.)
+            if manager.isSelfInitiatedRemoval(path: localPath) {
+                return // OpenDuck initiated this local removal; NEVER send delete to remote!
             }
 
             // SAFEGUARD LAYER 6: Mass Deletion Circuit Breaker

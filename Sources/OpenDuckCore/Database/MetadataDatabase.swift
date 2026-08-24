@@ -124,6 +124,21 @@ public final class MetadataDatabase: @unchecked Sendable {
         );
         CREATE INDEX IF NOT EXISTS idx_records_local ON file_records(local_path);
         CREATE INDEX IF NOT EXISTS idx_records_volume_remote ON file_records(volume_name, remote_path);
+
+        CREATE TABLE IF NOT EXISTS pinned_host_keys (
+            host_port TEXT PRIMARY KEY,
+            key_type TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            pinned_at REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS divergence_events (
+            id TEXT PRIMARY KEY,
+            volume_name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            timestamp REAL NOT NULL
+        );
         """
 
         lock.lock()
@@ -371,6 +386,75 @@ public final class MetadataDatabase: @unchecked Sendable {
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_text(stmt, 1, (volumeName as NSString).utf8String, -1, nil)
+            _ = sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
+    }
+
+    // MARK: - Host Key Pinning (TOFU)
+
+    public func pinnedFingerprint(forHost host: String, port: Int) -> String? {
+        let key = "\(host):\(port)"
+        let sql = "SELECT fingerprint FROM pinned_host_keys WHERE host_port = ? LIMIT 1;"
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        var stmt: OpaquePointer?
+        var result: String?
+
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(stmt, 1, (key as NSString).utf8String, -1, nil)
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                if let cStr = sqlite3_column_text(stmt, 0) {
+                    result = String(cString: cStr)
+                }
+            }
+        }
+        sqlite3_finalize(stmt)
+        return result
+    }
+
+    public func pinHostKey(host: String, port: Int, keyType: String, fingerprint: String) {
+        let key = "\(host):\(port)"
+        let sql = """
+        INSERT INTO pinned_host_keys (host_port, key_type, fingerprint, pinned_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(host_port) DO UPDATE SET
+            key_type = excluded.key_type,
+            fingerprint = excluded.fingerprint,
+            pinned_at = excluded.pinned_at;
+        """
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(stmt, 1, (key as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 2, (keyType as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 3, (fingerprint as NSString).utf8String, -1, nil)
+            sqlite3_bind_double(stmt, 4, Date().timeIntervalSince1970)
+            _ = sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
+    }
+
+    // MARK: - Divergence Events (Circuit Breaker & Desync Tracking)
+
+    public func recordDivergenceEvent(volumeName: String, path: String, reason: String) {
+        let sql = "INSERT INTO divergence_events (id, volume_name, path, reason, timestamp) VALUES (?, ?, ?, ?, ?);"
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(stmt, 1, (UUID().uuidString as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 2, (volumeName as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 3, (path as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 4, (reason as NSString).utf8String, -1, nil)
+            sqlite3_bind_double(stmt, 5, Date().timeIntervalSince1970)
             _ = sqlite3_step(stmt)
         }
         sqlite3_finalize(stmt)
