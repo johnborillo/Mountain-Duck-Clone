@@ -1,6 +1,6 @@
 # 🦆 OpenDuck
 
-> **Native macOS Remote Cloud Filesystem Mounter**  
+> **Native macOS Remote Cloud Filesystem Mounter**
 > An open-source alternative to Mountain Duck for mounting remote filesystems directly into macOS Finder.
 
 ---
@@ -20,12 +20,14 @@
 ## 🚀 Quick Start
 
 ### 1. Build and Run Tests
+
 ```bash
 # Run the complete automated test suite
 swift test
 ```
 
 ### 2. Use the CLI Tool (`openduck`)
+
 ```bash
 # Run built-in diagnostic and simulation suite
 swift run openduck test
@@ -38,7 +40,9 @@ swift run openduck cache-stats
 ```
 
 ### 3. Build & Install the Menu Bar App
+
 To compile and assemble the macOS `.app` bundle into `/Applications`:
+
 ```bash
 chmod +x scripts/build_app.sh
 ./scripts/build_app.sh
@@ -72,4 +76,3 @@ For full architectural blueprints, see [`openduck_architecture.md`](./openduck_a
 ## 📄 License
 
 MIT License. Contributions and issues welcome!
-

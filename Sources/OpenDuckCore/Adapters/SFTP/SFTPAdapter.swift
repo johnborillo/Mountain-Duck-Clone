@@ -99,17 +99,19 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             return RemoteFileEntry(name: "/", path: "/", itemType: .directory, size: 0, modificationDate: Date())
         }
 
-        let batchCommands = "ls -ld \"\(escapePath(resolved))\"\n"
+        let batchCommands = "ls -l \"\(escapePath(resolved))\"\n"
         let output = try await executeSFTPBatch(batchCommands)
+
+        if output.exitCode != 0 || output.stdout.contains("not found") || output.stderr.contains("not found") || output.stderr.contains("No such file") {
+            throw AdapterError.fileNotFound(resolved)
+        }
 
         let entries = parseSFTPDirectoryListing(output.stdout, parentPath: (resolved as NSString).deletingLastPathComponent)
         if let first = entries.first {
             return first
         }
 
-        // Fallback generic entry if path exists
-        let name = (resolved as NSString).lastPathComponent
-        return RemoteFileEntry(name: name, path: resolved, itemType: .file, size: 0, modificationDate: Date())
+        throw AdapterError.fileNotFound(resolved)
     }
 
     public func download(remotePath: String, to localURL: URL, progress: Progress?) async throws {
@@ -137,11 +139,47 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             throw AdapterError.fileNotFound(localURL.path)
         }
 
-        let batchCommands = "put \"\(escapePath(localURL.path))\" \"\(escapePath(resolved))\"\n"
-        let output = try await executeSFTPBatch(batchCommands)
+        let localAttrs = try FileManager.default.attributesOfItem(atPath: localURL.path)
+        let localSize = (localAttrs[.size] as? Int64) ?? 0
 
-        if output.exitCode != 0 {
-            throw AdapterError.networkError(output.stderr.isEmpty ? "SFTP upload failed for \(remotePath)" : output.stderr)
+        // =========================================================================
+        // SAFEGUARD LAYER 1: HARD OVERWRITE PROTECTION
+        // Never allow a 0-byte local placeholder to overwrite an existing remote file
+        // =========================================================================
+        if let remoteStat = try? await stat(path: resolved) {
+            if remoteStat.size > 0 && localSize == 0 {
+                let errorMsg = "SAFETY SHIELD BLOCKED: Refusing to overwrite remote file '\(resolved)' (\(remoteStat.size) bytes) with local 0-byte file."
+                print("🛑 [OpenDuck Safety Shield] \(errorMsg)")
+                throw AdapterError.invalidPath(errorMsg)
+            }
+        }
+
+        // =========================================================================
+        // SAFEGUARD LAYER 2: ATOMIC STAGING UPLOAD & SAFE RENAME
+        // Upload to a temporary staging file first, then atomically rename.
+        // If upload is interrupted or fails, the original remote file is never corrupted.
+        // =========================================================================
+        let stagingSuffix = ".openduck_staging_\(UUID().uuidString.prefix(8))"
+        let stagingRemotePath = resolved + stagingSuffix
+
+        // Step 1: Put to staging path
+        let uploadBatch = "put \"\(escapePath(localURL.path))\" \"\(escapePath(stagingRemotePath))\"\n"
+        let uploadOutput = try await executeSFTPBatch(uploadBatch)
+
+        if uploadOutput.exitCode != 0 {
+            // Clean up staging file if any partial was left
+            _ = try? await executeSFTPBatch("rm \"\(escapePath(stagingRemotePath))\"\n")
+            throw AdapterError.networkError(uploadOutput.stderr.isEmpty ? "SFTP upload failed for \(remotePath)" : uploadOutput.stderr)
+        }
+
+        // Step 2: Atomic rename staging -> final destination
+        let renameBatch = "rename \"\(escapePath(stagingRemotePath))\" \"\(escapePath(resolved))\"\n"
+        let renameOutput = try await executeSFTPBatch(renameBatch)
+
+        if renameOutput.exitCode != 0 {
+            // Clean up staging file
+            _ = try? await executeSFTPBatch("rm \"\(escapePath(stagingRemotePath))\"\n")
+            throw AdapterError.networkError("SFTP atomic commit failed: \(renameOutput.stderr)")
         }
 
         progress?.completedUnitCount = 100
@@ -306,7 +344,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             let size = Int64(tokens[4]) ?? 0
 
             // Filename is everything after the 8th token (timestamp)
-            // May be a full path (e.g. /data-storage/career) or just a name (career)
+            // May be a full path (e.g. /var/data/files) or just a name (files)
             let rawName = tokens[8...].joined(separator: " ")
 
             // Extract basename — the actual file/folder name without path prefix

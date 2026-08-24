@@ -25,6 +25,10 @@ public struct CacheEntry: Codable, Sendable, Identifiable {
     public var state: CacheState
     public var etag: String?
 
+    public var isDirty: Bool {
+        state == .dirty || state == .uploading
+    }
+
     public init(
         itemIdentifier: String,
         remotePath: String,

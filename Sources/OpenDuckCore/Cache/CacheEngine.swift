@@ -81,6 +81,14 @@ public final class CacheEngine: @unchecked Sendable {
         }
     }
 
+    public func entry(for itemIdentifier: String) -> CacheEntry? {
+        sync { index[itemIdentifier] }
+    }
+
+    public func isItemDirty(itemIdentifier: String) -> Bool {
+        sync { index[itemIdentifier]?.isDirty ?? false }
+    }
+
     /// Retrieve local cached file URL if materialized, or download from remote adapter on demand.
     public func getOrHydrate(
         itemIdentifier: String,
@@ -171,6 +179,20 @@ public final class CacheEngine: @unchecked Sendable {
         }
     }
 
+    /// Mark an item clean after it has been successfully synchronized to the remote adapter.
+    public func markClean(itemIdentifier: String, remotePath: String) {
+        sync {
+            if var entry = index[itemIdentifier] {
+                entry.state = .materialized
+                entry.remoteModificationDate = Date()
+                index[itemIdentifier] = entry
+            }
+        }
+        if let op = journal.pendingEntries().first(where: { $0.itemIdentifier == itemIdentifier || $0.remotePath == remotePath }) {
+            journal.remove(id: op.id)
+        }
+    }
+
     /// Commit dirty files to remote storage through the adapter.
     public func syncPendingWrites(with adapter: RemoteFilesystemAdapter) async throws {
         let pending = journal.pendingEntries()
@@ -225,6 +247,21 @@ public final class CacheEngine: @unchecked Sendable {
             let localURL = fileURL(for: itemIdentifier)
             if FileManager.default.fileExists(atPath: localURL.path) {
                 try FileManager.default.removeItem(at: localURL)
+            }
+        }
+    }
+
+    /// Purge all unpinned, non-dirty cached files and reset their states to placeholder.
+    public func purgeUnpinned() throws {
+        let unpinned: [String] = sync {
+            index.values.filter { !$0.isPinned && $0.state != .dirty }.map { $0.itemIdentifier }
+        }
+        for id in unpinned {
+            try? evict(itemIdentifier: id)
+        }
+        if let files = try? FileManager.default.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: nil) {
+            for file in files {
+                try? FileManager.default.removeItem(at: file)
             }
         }
     }

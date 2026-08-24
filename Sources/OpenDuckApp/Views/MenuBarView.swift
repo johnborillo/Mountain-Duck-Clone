@@ -138,8 +138,18 @@ public struct MenuBarView: View {
                     .foregroundColor(isMounted ? .green : .secondary)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(profile.name)
-                        .font(.subheadline).bold()
+                    HStack(spacing: 6) {
+                        Text(profile.name)
+                            .font(.subheadline).bold()
+                        if profile.isReadOnly {
+                            Text("READ-ONLY")
+                                .font(.system(size: 8, weight: .bold))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.secondary.opacity(0.2))
+                                .cornerRadius(3)
+                        }
+                    }
                     Text("\(profile.protocolType.rawValue) • \(profile.username)@\(profile.host):\(profile.port)\(profile.remoteRootPath)")
                         .font(.caption2)
                         .foregroundColor(.secondary)
@@ -171,12 +181,23 @@ public struct MenuBarView: View {
                     .buttonStyle(.borderless)
 
                     Button(action: {
-                        Task { await viewModel.mount(profile: profile) }
+                        Task { await viewModel.syncVolume(profile: profile) }
                     }) {
                         Label("Sync", systemImage: "arrow.clockwise")
                             .font(.caption)
                     }
                     .buttonStyle(.borderless)
+
+                    if viewModel.isCircuitBreakerTripped(for: profile) {
+                        Button(action: {
+                            viewModel.resetCircuitBreaker(for: profile)
+                        }) {
+                            Label("Reset Shield", systemImage: "shield.slash")
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                        }
+                        .buttonStyle(.borderless)
+                    }
 
                     Spacer()
 

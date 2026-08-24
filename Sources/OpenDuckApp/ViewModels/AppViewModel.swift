@@ -24,6 +24,7 @@ public final class AppViewModel: ObservableObject {
     public let connectionManager: ConnectionManager
     public let cacheEngine: CacheEngine
     public let volumeManager: VolumeMountManager
+    private var timer: Timer?
 
     public init(
         connectionManager: ConnectionManager = .shared,
@@ -37,6 +38,7 @@ public final class AppViewModel: ObservableObject {
         self.cacheEngine = cacheEngine ?? CacheEngine(cacheDirectory: cacheDir)
 
         loadInitialData()
+        startPeriodicRefresh()
     }
 
     public func loadInitialData() {
@@ -94,7 +96,7 @@ public final class AppViewModel: ObservableObject {
             let adapter = try await connectionManager.connect(to: profile.id)
 
             statusMessage = "Mounting volume..."
-            let volumeURL = try volumeManager.mount(name: profile.name)
+            let volumeURL = try volumeManager.mount(name: profile.name, isReadOnly: profile.isReadOnly)
 
             // Shallow listing of root directory only — instant!
             statusMessage = "Listing \(profile.remoteRootPath)..."
@@ -102,20 +104,28 @@ public final class AppViewModel: ObservableObject {
                 adapter: adapter,
                 remotePath: profile.remoteRootPath,
                 localURL: volumeURL,
-                cacheEngine: cacheEngine
+                cacheEngine: cacheEngine,
+                isReadOnly: profile.isReadOnly
             )
 
-            // Start FSEvents watcher for lazy on-demand subfolder loading
+            // Start bidirectional FSEvents watcher (auto-uploads new/modified files and syncs deletes)
             volumeManager.startWatching(
                 name: profile.name,
                 volumeURL: volumeURL,
                 remoteRootPath: profile.remoteRootPath,
                 adapter: adapter,
-                cacheEngine: cacheEngine
-            )
+                cacheEngine: cacheEngine,
+                isReadOnly: profile.isReadOnly
+            ) { [weak self] status in
+                Task { @MainActor in
+                    self?.statusMessage = status
+                    self?.refreshCacheStats()
+                }
+            }
 
             mountedDomainIDs.insert(profile.id)
-            statusMessage = "✓ Mounted '\(profile.name)'"
+            let modeBadge = profile.isReadOnly ? " [Read-Only]" : ""
+            statusMessage = "✓ Mounted '\(profile.name)'\(modeBadge)"
 
             openInFinder(for: profile)
         } catch {
@@ -131,6 +141,43 @@ public final class AppViewModel: ObservableObject {
         mountedDomainIDs.remove(profile.id)
         statusMessage = "Unmounted '\(profile.name)'."
         refreshCacheStats()
+    }
+
+    public func resetCircuitBreaker(for profile: ServerProfile) {
+        volumeManager.resetCircuitBreaker(name: profile.name)
+        statusMessage = "✓ Circuit breaker reset for '\(profile.name)'"
+    }
+
+    public func isCircuitBreakerTripped(for profile: ServerProfile) -> Bool {
+        volumeManager.isCircuitBreakerTripped(name: profile.name)
+    }
+
+    public func syncVolume(profile: ServerProfile) async {
+        isMounting = true
+        defer { isMounting = false }
+        statusMessage = "Syncing with \(profile.host)..."
+
+        do {
+            let adapter = try await connectionManager.connect(to: profile.id)
+            let volumeURL = URL(fileURLWithPath: "/Volumes/\(profile.name)")
+
+            if !FileManager.default.fileExists(atPath: volumeURL.path) {
+                await mount(profile: profile)
+                return
+            }
+
+            _ = try await volumeManager.syncAllPopulatedDirectories(
+                adapter: adapter,
+                rootRemotePath: profile.remoteRootPath,
+                volumeURL: volumeURL,
+                cacheEngine: cacheEngine,
+                isReadOnly: profile.isReadOnly
+            )
+            statusMessage = "✓ Synced with \(profile.name)"
+            refreshCacheStats()
+        } catch {
+            statusMessage = "❌ Sync failed: \(error.localizedDescription)"
+        }
     }
 
     public func openInFinder(for profile: ServerProfile) {
@@ -149,8 +196,13 @@ public final class AppViewModel: ObservableObject {
     }
 
     public func purgeCache() {
-        statusMessage = "Purged unpinned cache."
-        refreshCacheStats()
+        do {
+            try cacheEngine.purgeUnpinned()
+            statusMessage = "✓ Cleared unpinned cache."
+            refreshCacheStats()
+        } catch {
+            statusMessage = "❌ Failed to clear cache: \(error.localizedDescription)"
+        }
     }
 
     private func refreshMountedVolumes() {
@@ -161,5 +213,14 @@ public final class AppViewModel: ObservableObject {
             }
         }
         self.mountedDomainIDs = mounted
+    }
+
+    private func startPeriodicRefresh() {
+        timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshCacheStats()
+                self?.refreshMountedVolumes()
+            }
+        }
     }
 }

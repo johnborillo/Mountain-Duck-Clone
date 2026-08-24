@@ -16,6 +16,7 @@ public struct AddEditConnectionSheet: View {
     @State private var privateKeyPath: String = ""
     @State private var remoteRootPath: String = "/"
     @State private var autoConnect: Bool = false
+    @State private var isReadOnly: Bool = false
 
     public init(viewModel: AppViewModel) {
         self.viewModel = viewModel
@@ -185,6 +186,10 @@ public struct AddEditConnectionSheet: View {
                     Toggle("Connect automatically on app launch", isOn: $autoConnect)
                         .font(.subheadline)
                         .padding(.horizontal, 4)
+
+                    Toggle("Read-Only / Safe Preview Mode (Protects Remote Data)", isOn: $isReadOnly)
+                        .font(.subheadline)
+                        .padding(.horizontal, 4)
                 }
                 .padding(16)
             }
@@ -212,7 +217,7 @@ public struct AddEditConnectionSheet: View {
             .padding(.vertical, 12)
             .background(Color(NSColor.controlBackgroundColor))
         }
-        .frame(width: 400, height: 480)
+        .frame(width: 400, height: 500)
     }
 
     private func browseKeyFile() {
@@ -239,7 +244,8 @@ public struct AddEditConnectionSheet: View {
             authType: authType,
             privateKeyPath: privateKeyPath.isEmpty ? nil : privateKeyPath,
             remoteRootPath: remoteRootPath.isEmpty ? "/" : remoteRootPath,
-            autoConnect: autoConnect
+            autoConnect: autoConnect,
+            isReadOnly: isReadOnly
         )
         viewModel.addProfile(profile, secret: passwordSecret)
     }

@@ -27,6 +27,7 @@ public struct ServerProfile: Codable, Sendable, Identifiable, Equatable {
     public var privateKeyPath: String?
     public var remoteRootPath: String
     public var autoConnect: Bool
+    public var isReadOnly: Bool
     public var createdAt: Date
     public var lastConnectedAt: Date?
 
@@ -41,6 +42,7 @@ public struct ServerProfile: Codable, Sendable, Identifiable, Equatable {
         privateKeyPath: String? = nil,
         remoteRootPath: String = "/",
         autoConnect: Bool = false,
+        isReadOnly: Bool = false,
         createdAt: Date = Date(),
         lastConnectedAt: Date? = nil
     ) {
@@ -54,6 +56,7 @@ public struct ServerProfile: Codable, Sendable, Identifiable, Equatable {
         self.privateKeyPath = privateKeyPath
         self.remoteRootPath = remoteRootPath
         self.autoConnect = autoConnect
+        self.isReadOnly = isReadOnly
         self.createdAt = createdAt
         self.lastConnectedAt = lastConnectedAt
     }

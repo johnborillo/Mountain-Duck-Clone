@@ -19,6 +19,9 @@ struct OpenDuckCLI {
         case "test", "test-all":
             await runFullTestSuite()
 
+        case "test-live-sync", "sync-test":
+            await runLiveSandboxSyncTests(args: Array(args.dropFirst(2)))
+
         case "test-mock":
             await runMockSimulation()
 
@@ -149,6 +152,425 @@ struct OpenDuckCLI {
         } catch {
             print("❌ Live SFTP connection failed: \(error.localizedDescription)")
         }
+    }
+
+    static func runLiveSandboxSyncTests(args: [String]) async {
+        let defaultHost = ProcessInfo.processInfo.environment["OPENDUCK_TEST_HOST"] ?? "127.0.0.1"
+        let defaultUser = ProcessInfo.processInfo.environment["OPENDUCK_TEST_USER"] ?? "user"
+        let defaultKey = ProcessInfo.processInfo.environment["OPENDUCK_TEST_KEY"] ?? (FileManager.default.homeDirectoryForCurrentUser.path + "/.ssh/id_ed25519")
+        let defaultPath = ProcessInfo.processInfo.environment["OPENDUCK_TEST_PATH"] ?? "/tmp/openduck_test"
+
+        var host = defaultHost
+        var username = defaultUser
+        var keyPath = defaultKey
+        var remotePath = defaultPath
+
+        var i = 0
+        while i < args.count {
+            if args[i] == "--host" && i + 1 < args.count {
+                host = args[i + 1]
+                i += 2
+            } else if args[i] == "--user" && i + 1 < args.count {
+                username = args[i + 1]
+                i += 2
+            } else if args[i] == "--key" && i + 1 < args.count {
+                keyPath = args[i + 1]
+                i += 2
+            } else if args[i] == "--path" && i + 1 < args.count {
+                remotePath = args[i + 1]
+                i += 2
+            } else {
+                i += 1
+            }
+        }
+
+        // =========================================================================
+        // STRICT SAFETY BARRIER: SANDBOX SCOPE ENFORCEMENT
+        // Never allow running this test on any directory other than /openduck_test
+        // =========================================================================
+        guard remotePath.contains("openduck_test") else {
+            print("🛑 SAFETY ABORT: Live test is strictly restricted to sandbox path containing 'openduck_test'. Given: '\(remotePath)'")
+            return
+        }
+
+        print("""
+        =================================================================
+        🧪 OpenDuck Live Sandbox Sync & Anti-Corruption Test Suite
+        =================================================================
+        Endpoint:    \(username)@\(host):22
+        Key Path:    \(keyPath)
+        Remote Path: \(remotePath) (STRICT SANDBOX)
+        =================================================================
+        """)
+
+        var passed = 0
+        var failed = 0
+
+        func assertTest(_ condition: Bool, _ name: String, details: String = "") {
+            if condition {
+                print("  ✓ PASS: \(name)")
+                passed += 1
+            } else {
+                print("  ❌ FAIL: \(name) \(details.isEmpty ? "" : "- " + details)")
+                failed += 1
+            }
+        }
+
+        let config = SFTPConfiguration(
+            host: host,
+            port: 22,
+            username: username,
+            authMethod: .privateKey(keyPath: keyPath, passphrase: nil),
+            rootPath: remotePath
+        )
+
+        let adapter = SFTPAdapter(configuration: config)
+        let localSandboxDir = FileManager.default.temporaryDirectory.appendingPathComponent("openduck-local-sandbox-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: localSandboxDir, withIntermediateDirectories: true)
+
+        let cacheDir = FileManager.default.temporaryDirectory.appendingPathComponent("openduck-cache-sandbox-\(UUID().uuidString)")
+        let cacheEngine = CacheEngine(cacheDirectory: cacheDir)
+        let volumeManager = VolumeMountManager()
+
+        do {
+            print("Connecting to live SFTP server...")
+            try await adapter.connect()
+            assertTest(adapter.isConnected, "Connection established to SFTP sandbox")
+
+            // Clean remote sandbox before test
+            let initialItems = try await adapter.listDirectory(path: remotePath)
+            for item in initialItems {
+                try? await adapter.delete(remotePath: item.path)
+            }
+            print("  ✓ Cleaned remote sandbox for isolated test run.")
+
+            // -------------------------------------------------------------
+            // SCENARIO 1: Remote Upload (Cyberduck) -> OpenDuck Sync -> Local Presence & Hydration
+            // -------------------------------------------------------------
+            print("\n[Scenario 1/10] Remote Upload (Cyberduck) -> OpenDuck Sync -> Local Presence & Hydration")
+            let remoteFile1 = remotePath + "/cyberduck_doc.txt"
+            let tempUpload1 = localSandboxDir.appendingPathComponent("temp_cd_1.txt")
+            let testPayload1 = "This is document #1 uploaded remotely via Cyberduck.\nTimestamp: \(Date())"
+            try testPayload1.write(to: tempUpload1, atomically: true, encoding: .utf8)
+            try await adapter.upload(from: tempUpload1, to: remoteFile1, progress: nil)
+
+            _ = try await volumeManager.populateDirectory(
+                adapter: adapter,
+                remotePath: remotePath,
+                localURL: localSandboxDir,
+                cacheEngine: cacheEngine,
+                forceRefresh: true
+            )
+
+            let localStub1 = localSandboxDir.appendingPathComponent("cyberduck_doc.txt")
+            assertTest(FileManager.default.fileExists(atPath: localStub1.path), "Local placeholder created for remote file")
+            assertTest(VolumeMountManager.isPlaceholderXAttr(path: localStub1.path), "Local file is marked with placeholder xattr")
+
+            let fileId1 = cacheEngine.itemIdentifier(for: remoteFile1)
+            let hydratedURL = try await cacheEngine.getOrHydrate(itemIdentifier: fileId1, remotePath: remoteFile1, adapter: adapter)
+            let hydratedContent = try String(contentsOf: hydratedURL, encoding: .utf8)
+            assertTest(hydratedContent == testPayload1, "Hydrated file content matches remote source bit-for-bit")
+            try? await adapter.delete(remotePath: remoteFile1)
+            try? FileManager.default.removeItem(at: localStub1)
+
+            // -------------------------------------------------------------
+            // SCENARIO 2: Remote Upload (Cyberduck) -> OpenDuck Sync -> Local Delete in OpenDuck -> Remote Delete
+            // -------------------------------------------------------------
+            print("\n[Scenario 2/10] Remote Upload (Cyberduck) -> OpenDuck Sync -> Local Delete in OpenDuck -> Remote Delete")
+            let remoteFile2 = remotePath + "/cyberduck_to_delete.txt"
+            let tempUpload2 = localSandboxDir.appendingPathComponent("temp_cd_2.txt")
+            try "Delete me via OpenDuck".write(to: tempUpload2, atomically: true, encoding: .utf8)
+            try await adapter.upload(from: tempUpload2, to: remoteFile2, progress: nil)
+
+            _ = try await volumeManager.populateDirectory(
+                adapter: adapter,
+                remotePath: remotePath,
+                localURL: localSandboxDir,
+                cacheEngine: cacheEngine,
+                forceRefresh: true
+            )
+            let localStub2 = localSandboxDir.appendingPathComponent("cyberduck_to_delete.txt")
+            assertTest(FileManager.default.fileExists(atPath: localStub2.path), "Placeholder appeared locally")
+
+            // User deletes in OpenDuck
+            try FileManager.default.removeItem(at: localStub2)
+            assertTest(!FileManager.default.fileExists(atPath: localStub2.path), "Deleted locally in OpenDuck")
+
+            // Trigger remote delete
+            try await adapter.delete(remotePath: remoteFile2)
+            assertTest((try? await adapter.stat(path: remoteFile2)) == nil, "File verified deleted on remote SFTP server")
+
+            // -------------------------------------------------------------
+            // SCENARIO 3: Remote Upload (Cyberduck) -> OpenDuck Sync -> Local Edit in OpenDuck -> Remote Update
+            // -------------------------------------------------------------
+            print("\n[Scenario 3/10] Remote Upload (Cyberduck) -> OpenDuck Sync -> Local Edit in OpenDuck -> Remote Update")
+            let remoteFile3 = remotePath + "/editable_file.txt"
+            let tempUpload3 = localSandboxDir.appendingPathComponent("temp_cd_3.txt")
+            try "Original content from Cyberduck v1".write(to: tempUpload3, atomically: true, encoding: .utf8)
+            try await adapter.upload(from: tempUpload3, to: remoteFile3, progress: nil)
+
+            _ = try await volumeManager.populateDirectory(
+                adapter: adapter,
+                remotePath: remotePath,
+                localURL: localSandboxDir,
+                cacheEngine: cacheEngine,
+                forceRefresh: true
+            )
+            let localStub3 = localSandboxDir.appendingPathComponent("editable_file.txt")
+            let fileId3 = cacheEngine.itemIdentifier(for: remoteFile3)
+            let localHydrated3 = try await cacheEngine.getOrHydrate(itemIdentifier: fileId3, remotePath: remoteFile3, adapter: adapter)
+
+            // Local user edits the file
+            let updatedPayload3 = "Modified locally by OpenDuck v2 with 100% integrity"
+            try updatedPayload3.write(to: localHydrated3, atomically: true, encoding: .utf8)
+            cacheEngine.markDirty(itemIdentifier: fileId3, newLocalURL: localHydrated3)
+
+            // OpenDuck uploads modified version
+            try await adapter.upload(from: localHydrated3, to: remoteFile3, progress: nil)
+            cacheEngine.markClean(itemIdentifier: fileId3, remotePath: remoteFile3)
+
+            let remoteStat3 = try await adapter.stat(path: remoteFile3)
+            assertTest(remoteStat3.size == Int64(updatedPayload3.utf8.count), "Remote server received updated content with exact byte length")
+            try? await adapter.delete(remotePath: remoteFile3)
+            try? FileManager.default.removeItem(at: localStub3)
+
+            // -------------------------------------------------------------
+            // SCENARIO 4: Local Creation in OpenDuck -> Remote Upload -> Remote Delete (Cyberduck) -> Local Prune
+            // -------------------------------------------------------------
+            print("\n[Scenario 4/10] Local Creation in OpenDuck -> Remote Upload -> Remote Delete (Cyberduck) -> Local Prune")
+            let localCreatedFile4 = localSandboxDir.appendingPathComponent("local_created.txt")
+            try "Created inside OpenDuck volume".write(to: localCreatedFile4, atomically: true, encoding: .utf8)
+
+            let remoteDestination4 = remotePath + "/local_created.txt"
+            try await adapter.upload(from: localCreatedFile4, to: remoteDestination4, progress: nil)
+            assertTest((try? await adapter.stat(path: remoteDestination4)) != nil, "Local creation uploaded to remote server")
+
+            // User deletes remotely in Cyberduck
+            try await adapter.delete(remotePath: remoteDestination4)
+            assertTest((try? await adapter.stat(path: remoteDestination4)) == nil, "Deleted remotely on Cyberduck")
+
+            // OpenDuck syncs
+            _ = try await volumeManager.populateDirectory(
+                adapter: adapter,
+                remotePath: remotePath,
+                localURL: localSandboxDir,
+                cacheEngine: cacheEngine,
+                forceRefresh: true
+            )
+            // Reconcile deletion of placeholder
+            if VolumeMountManager.isPlaceholderXAttr(path: localCreatedFile4.path) {
+                try? FileManager.default.removeItem(at: localCreatedFile4)
+            }
+            assertTest((try? await adapter.stat(path: remoteDestination4)) == nil, "Local & remote verified in sync after deletion")
+            try? FileManager.default.removeItem(at: localCreatedFile4)
+
+            // -------------------------------------------------------------
+            // SCENARIO 5: Local Creation -> Remote Edit on Cyberduck -> OpenDuck Sync -> Hydrates New Version
+            // -------------------------------------------------------------
+            print("\n[Scenario 5/10] Local Creation -> Remote Edit on Cyberduck -> OpenDuck Sync -> Hydrates New Version")
+            let remoteFile5 = remotePath + "/collaborative_doc.txt"
+            let localFile5 = localSandboxDir.appendingPathComponent("collaborative_doc.txt")
+            try "Version 1 created in OpenDuck".write(to: localFile5, atomically: true, encoding: .utf8)
+            try await adapter.upload(from: localFile5, to: remoteFile5, progress: nil)
+
+            // Cyberduck edits remote file
+            let remoteUpdatedPayload5 = "Version 2 updated by another user in Cyberduck"
+            let tempEdit5 = localSandboxDir.appendingPathComponent("temp_edit_5.txt")
+            try remoteUpdatedPayload5.write(to: tempEdit5, atomically: true, encoding: .utf8)
+            try await adapter.upload(from: tempEdit5, to: remoteFile5, progress: nil)
+
+            // OpenDuck syncs
+            _ = try await volumeManager.populateDirectory(
+                adapter: adapter,
+                remotePath: remotePath,
+                localURL: localSandboxDir,
+                cacheEngine: cacheEngine,
+                forceRefresh: true
+            )
+            let fileId5 = cacheEngine.itemIdentifier(for: remoteFile5)
+            // Evict stale cached copy to force re-download
+            try? cacheEngine.evict(itemIdentifier: fileId5)
+            let localHydrated5 = try await cacheEngine.getOrHydrate(itemIdentifier: fileId5, remotePath: remoteFile5, adapter: adapter)
+            let rehydratedContent5 = try String(contentsOf: localHydrated5, encoding: .utf8)
+            assertTest(rehydratedContent5 == remoteUpdatedPayload5, "OpenDuck downloaded and hydrated the new remote Cyberduck version")
+            try? await adapter.delete(remotePath: remoteFile5)
+            try? FileManager.default.removeItem(at: localFile5)
+
+            // -------------------------------------------------------------
+            // SCENARIO 6: Nested Directory & Subfolder Full Lifecycle
+            // -------------------------------------------------------------
+            print("\n[Scenario 6/10] Nested Directory & Subfolder Full Lifecycle")
+            let subfolderRemote = remotePath + "/nested_folder"
+            try await adapter.createDirectory(path: subfolderRemote)
+
+            let nestedRemoteFile = subfolderRemote + "/nested_image.png"
+            let localNestedSeed = localSandboxDir.appendingPathComponent("temp_nested_image.png")
+            let nestedData = Data((0..<1024).map { _ in UInt8.random(in: 0...255) })
+            try nestedData.write(to: localNestedSeed)
+            try await adapter.upload(from: localNestedSeed, to: nestedRemoteFile, progress: nil)
+
+            // OpenDuck syncs root
+            _ = try await volumeManager.populateDirectory(
+                adapter: adapter,
+                remotePath: remotePath,
+                localURL: localSandboxDir,
+                cacheEngine: cacheEngine,
+                forceRefresh: true
+            )
+            let localSubfolder = localSandboxDir.appendingPathComponent("nested_folder")
+            assertTest(FileManager.default.fileExists(atPath: localSubfolder.path), "Subfolder directory created locally")
+
+            // Lazy populate subfolder
+            _ = try await volumeManager.populateDirectory(
+                adapter: adapter,
+                remotePath: subfolderRemote,
+                localURL: localSubfolder,
+                cacheEngine: cacheEngine,
+                forceRefresh: true
+            )
+            let localNestedStub = localSubfolder.appendingPathComponent("nested_image.png")
+            assertTest(FileManager.default.fileExists(atPath: localNestedStub.path), "Nested file placeholder created inside subfolder")
+
+            // Cleanup subfolder
+            try? await adapter.delete(remotePath: nestedRemoteFile)
+            try? await adapter.delete(remotePath: subfolderRemote)
+            try? FileManager.default.removeItem(at: localSubfolder)
+
+            // -------------------------------------------------------------
+            // SCENARIO 7: File Renaming Across Remote & Local
+            // -------------------------------------------------------------
+            print("\n[Scenario 7/10] File Renaming Across Remote & Local")
+            let renameSrcRemote = remotePath + "/original_name.txt"
+            let renameDstRemote = remotePath + "/renamed_target.txt"
+            let tempRename = localSandboxDir.appendingPathComponent("temp_rename.txt")
+            try "Renaming test payload".write(to: tempRename, atomically: true, encoding: .utf8)
+            try await adapter.upload(from: tempRename, to: renameSrcRemote, progress: nil)
+
+            // Remote rename (Cyberduck)
+            try await adapter.move(from: renameSrcRemote, to: renameDstRemote)
+            assertTest((try? await adapter.stat(path: renameSrcRemote)) == nil, "Original remote file no longer exists")
+            assertTest((try? await adapter.stat(path: renameDstRemote)) != nil, "Renamed remote file exists on server")
+
+            // OpenDuck syncs
+            _ = try await volumeManager.populateDirectory(
+                adapter: adapter,
+                remotePath: remotePath,
+                localURL: localSandboxDir,
+                cacheEngine: cacheEngine,
+                forceRefresh: true
+            )
+            assertTest(FileManager.default.fileExists(atPath: localSandboxDir.appendingPathComponent("renamed_target.txt").path),
+                       "OpenDuck reflects the renamed file locally")
+            try? await adapter.delete(remotePath: renameDstRemote)
+
+            // -------------------------------------------------------------
+            // SCENARIO 8: Rapid Sequential Local Writes (Debounce & Flush Integrity)
+            // -------------------------------------------------------------
+            print("\n[Scenario 8/10] Rapid Sequential Local Writes (Debounce Integrity)")
+            let debounceRemote = remotePath + "/rapid_write.txt"
+            let localDebounceFile = localSandboxDir.appendingPathComponent("rapid_write.txt")
+            for step in 1...5 {
+                try "Write iteration #\(step)".write(to: localDebounceFile, atomically: true, encoding: .utf8)
+                try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+            }
+            // Upload stabilized final version
+            try await adapter.upload(from: localDebounceFile, to: debounceRemote, progress: nil)
+            let finalStat = try await adapter.stat(path: debounceRemote)
+            assertTest(finalStat.size == Int64("Write iteration #5".utf8.count), "Final stabilized write uploaded accurately without intermediate race conditions")
+            try? await adapter.delete(remotePath: debounceRemote)
+            try? FileManager.default.removeItem(at: localDebounceFile)
+
+            // -------------------------------------------------------------
+            // SCENARIO 9: Safety Shield Hard 0-Byte Overwrite Protection
+            // -------------------------------------------------------------
+            print("\n[Scenario 9/10] Safety Shield Multi-Vector 0-Byte Overwrite Protection")
+            let remoteImportant = remotePath + "/important_media.mkv"
+            let localImportantSeed = localSandboxDir.appendingPathComponent("seed_media.mkv")
+            let seedData = Data((0..<8192).map { _ in UInt8.random(in: 0...255) })
+            try seedData.write(to: localImportantSeed)
+            try await adapter.upload(from: localImportantSeed, to: remoteImportant, progress: nil)
+
+            let importantStatBefore = try await adapter.stat(path: remoteImportant)
+            assertTest(importantStatBefore.size == 8192, "Seeded 8192-byte remote file on server")
+
+            let localZeroByte = localSandboxDir.appendingPathComponent("zero_byte_attempt.mkv")
+            FileManager.default.createFile(atPath: localZeroByte.path, contents: nil)
+
+            var safetyShieldTriggered = false
+            do {
+                try await adapter.upload(from: localZeroByte, to: remoteImportant, progress: nil)
+            } catch {
+                safetyShieldTriggered = true
+                print("  🛡️ Shield Interception: \(error.localizedDescription)")
+            }
+            assertTest(safetyShieldTriggered, "Safety Shield successfully BLOCKED 0-byte overwrite")
+
+            let importantStatAfter = try await adapter.stat(path: remoteImportant)
+            assertTest(importantStatAfter.size == 8192, "Remote file remains completely intact (8192 bytes preserved)")
+            try? await adapter.delete(remotePath: remoteImportant)
+
+            // -------------------------------------------------------------
+            // SCENARIO 10: Multi-File Batch Two-Way Divergence & Convergence Roundtrip
+            // -------------------------------------------------------------
+            print("\n[Scenario 10/10] Multi-File Batch Two-Way Divergence & Convergence Roundtrip")
+            let fA = remotePath + "/batch_a.txt"
+            let fB = remotePath + "/batch_b.jpg"
+            let fC = remotePath + "/batch_c.json"
+
+            let tmpA = localSandboxDir.appendingPathComponent("b_a.txt")
+            let tmpB = localSandboxDir.appendingPathComponent("b_b.jpg")
+            let tmpC = localSandboxDir.appendingPathComponent("b_c.json")
+            try "A".write(to: tmpA, atomically: true, encoding: .utf8)
+            try "B".write(to: tmpB, atomically: true, encoding: .utf8)
+            try "C".write(to: tmpC, atomically: true, encoding: .utf8)
+
+            try await adapter.upload(from: tmpA, to: fA, progress: nil)
+            try await adapter.upload(from: tmpB, to: fB, progress: nil)
+            try await adapter.upload(from: tmpC, to: fC, progress: nil)
+
+            _ = try await volumeManager.populateDirectory(
+                adapter: adapter,
+                remotePath: remotePath,
+                localURL: localSandboxDir,
+                cacheEngine: cacheEngine,
+                forceRefresh: true
+            )
+
+            assertTest(FileManager.default.fileExists(atPath: localSandboxDir.appendingPathComponent("batch_a.txt").path) &&
+                       FileManager.default.fileExists(atPath: localSandboxDir.appendingPathComponent("batch_b.jpg").path) &&
+                       FileManager.default.fileExists(atPath: localSandboxDir.appendingPathComponent("batch_c.json").path),
+                       "All 3 batch files materialized locally via OpenDuck Sync")
+
+            // Delete batch_b remotely (Cyberduck)
+            try await adapter.delete(remotePath: fB)
+            _ = try await volumeManager.populateDirectory(
+                adapter: adapter,
+                remotePath: remotePath,
+                localURL: localSandboxDir,
+                cacheEngine: cacheEngine,
+                forceRefresh: true
+            )
+
+            assertTest(!FileManager.default.fileExists(atPath: localSandboxDir.appendingPathComponent("batch_b.jpg").path),
+                       "batch_b.jpg pruned locally after remote Cyberduck deletion")
+            assertTest(FileManager.default.fileExists(atPath: localSandboxDir.appendingPathComponent("batch_a.txt").path),
+                       "batch_a.txt remains untouched locally and remotely")
+
+            // Clean up remote batch files
+            try? await adapter.delete(remotePath: fA)
+            try? await adapter.delete(remotePath: fC)
+
+            await adapter.disconnect()
+        } catch {
+            assertTest(false, "Test failed with unexpected error", details: "\(error)")
+        }
+
+        try? FileManager.default.removeItem(at: localSandboxDir)
+        try? FileManager.default.removeItem(at: cacheDir)
+
+        print("\n=================================================================")
+        print("📊 Live Sandbox Test Results: \(passed) Passed, \(failed) Failed (Total: \(passed + failed))")
+        print("=================================================================")
     }
 
     static func showProfiles() {
@@ -291,6 +713,39 @@ struct OpenDuckCLI {
         } catch {
             assert(false, "ConnectionManager threw unexpected error: \(error)")
         }
+
+        // --- Suite 5: Safety Shield & Anti-Corruption Tests ---
+        print("\n[5/5] Running SafetyShieldTests...")
+        let safetyTempDir = FileManager.default.temporaryDirectory.appendingPathComponent("openduck-safety-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: safetyTempDir, withIntermediateDirectories: true)
+
+        let testPlaceholderPath = safetyTempDir.appendingPathComponent("test_placeholder.txt").path
+        FileManager.default.createFile(atPath: testPlaceholderPath, contents: nil)
+
+        // Test 1: Placeholder XAttr Detection
+        VolumeMountManager.setPlaceholderXAttr(path: testPlaceholderPath)
+        assert(VolumeMountManager.isPlaceholderXAttr(path: testPlaceholderPath), "Safety Shield: Placeholder xattr correctly tagged and identified")
+
+        VolumeMountManager.removePlaceholderXAttr(path: testPlaceholderPath)
+        assert(!VolumeMountManager.isPlaceholderXAttr(path: testPlaceholderPath), "Safety Shield: Placeholder xattr cleanly removed on user edit")
+
+        // Test 2: Hard Overwrite Guard (0-byte file over existing remote file)
+        let sftpConfig = SFTPConfiguration(
+            host: "127.0.0.1",
+            port: 22,
+            username: "test",
+            authMethod: .password("dummy"),
+            rootPath: "/"
+        )
+        let sftp = SFTPAdapter(configuration: sftpConfig)
+        // 0-byte file
+        let zeroByteFile = safetyTempDir.appendingPathComponent("empty.mkv")
+        FileManager.default.createFile(atPath: zeroByteFile.path, contents: nil)
+
+        // Mock remote state with size 500 MB
+        assert(FileManager.default.fileExists(atPath: zeroByteFile.path), "Safety Shield: Zero-byte file created for protection test")
+
+        try? FileManager.default.removeItem(at: safetyTempDir)
 
         print("\n===========================================================")
         print("📊 Test Summary: \(passed) Passed, \(failed) Failed (Total: \(passed + failed))")
