@@ -53,6 +53,27 @@ swift build -c release
 mkdir -p /Applications/OpenDuck.app/Contents/MacOS /Applications/OpenDuck.app/Contents/Resources
 cp .build/release/OpenDuckApp /Applications/OpenDuck.app/Contents/MacOS/OpenDuck
 chmod +x /Applications/OpenDuck.app/Contents/MacOS/OpenDuck
+
+cat << 'EOF' > /Applications/OpenDuck.app/Contents/Info.plist
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>OpenDuck</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.openduck.app</string>
+    <key>CFBundleName</key>
+    <string>OpenDuck</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>
+EOF
 ```
 
 ---
