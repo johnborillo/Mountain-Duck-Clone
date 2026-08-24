@@ -151,6 +151,10 @@ public final class MetadataDatabase: @unchecked Sendable {
                 sqlite3_free(errMsg)
             }
         }
+
+        // Migration: auto-heal any legacy padded host key fingerprints
+        let migration = "UPDATE pinned_host_keys SET fingerprint = RTRIM(fingerprint, '=');"
+        _ = sqlite3_exec(db, migration, nil, nil, nil)
     }
 
     // MARK: - Upsert & Query Operations
@@ -417,6 +421,11 @@ public final class MetadataDatabase: @unchecked Sendable {
 
     public func pinHostKey(host: String, port: Int, keyType: String, fingerprint: String) {
         let key = "\(host):\(port)"
+        var cleanFingerprint = fingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+        while cleanFingerprint.hasSuffix("=") {
+            cleanFingerprint.removeLast()
+        }
+
         let sql = """
         INSERT INTO pinned_host_keys (host_port, key_type, fingerprint, pinned_at)
         VALUES (?, ?, ?, ?)
@@ -433,8 +442,23 @@ public final class MetadataDatabase: @unchecked Sendable {
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_text(stmt, 1, (key as NSString).utf8String, -1, nil)
             sqlite3_bind_text(stmt, 2, (keyType as NSString).utf8String, -1, nil)
-            sqlite3_bind_text(stmt, 3, (fingerprint as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 3, (cleanFingerprint as NSString).utf8String, -1, nil)
             sqlite3_bind_double(stmt, 4, Date().timeIntervalSince1970)
+            _ = sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
+    }
+
+    public func unpinHostKey(host: String, port: Int) {
+        let key = "\(host):\(port)"
+        let sql = "DELETE FROM pinned_host_keys WHERE host_port = ?;"
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(stmt, 1, (key as NSString).utf8String, -1, nil)
             _ = sqlite3_step(stmt)
         }
         sqlite3_finalize(stmt)

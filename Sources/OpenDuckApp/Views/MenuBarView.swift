@@ -30,6 +30,20 @@ public struct MenuBarView: View {
                 Text("🦆 OpenDuck")
                     .font(.headline)
 
+                if let speed = viewModel.totalTransferSpeedFormatted {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 11))
+                        Text(speed)
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    }
+                    .foregroundColor(.accentColor)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.accentColor.opacity(0.12))
+                    .cornerRadius(4)
+                }
+
                 Spacer()
 
                 Button(action: {
@@ -72,6 +86,39 @@ public struct MenuBarView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 6)
                 .background(Color.accentColor.opacity(0.1))
+            }
+
+            // Active & Recent Transfers Section
+            if !viewModel.activeTransfers.isEmpty || !viewModel.recentTransfers.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("TRANSFERS")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.secondary)
+
+                        Spacer()
+
+                        if !viewModel.activeTransfers.isEmpty {
+                            Text("\(viewModel.activeTransfers.count) active")
+                                .font(.system(size: 10))
+                                .foregroundColor(.accentColor)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+
+                    ForEach(viewModel.activeTransfers) { transfer in
+                        activeTransferCard(for: transfer)
+                    }
+
+                    ForEach(viewModel.recentTransfers.prefix(2)) { transfer in
+                        recentTransferRow(for: transfer)
+                    }
+                }
+                .padding(.bottom, 6)
+                .background(Color(NSColor.windowBackgroundColor).opacity(0.5))
+
+                Divider()
             }
 
             // Connection Profile List
@@ -214,5 +261,75 @@ public struct MenuBarView: View {
             }
         }
         .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private func activeTransferCard(for transfer: TransferProgress) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: transfer.direction == .upload ? "arrow.up.circle.fill" : "arrow.down.circle.fill")
+                    .foregroundColor(.accentColor)
+                    .font(.system(size: 13))
+
+                Text(transfer.fileName)
+                    .font(.caption).bold()
+                    .lineLimit(1)
+
+                Spacer()
+
+                if !transfer.formattedSpeed.isEmpty {
+                    Text(transfer.formattedSpeed)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.accentColor)
+                }
+
+                if !transfer.formattedETA.isEmpty {
+                    Text(transfer.formattedETA)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            ProgressView(value: transfer.progressFraction)
+                .progressViewStyle(.linear)
+
+            HStack {
+                Text(transfer.formattedTransferred)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                Text(transfer.percentageString)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(6)
+        .padding(.horizontal, 12)
+    }
+
+    @ViewBuilder
+    private func recentTransferRow(for transfer: TransferProgress) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: transfer.state == .completed ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .foregroundColor(transfer.state == .completed ? .green : .red)
+                .font(.system(size: 11))
+
+            Text(transfer.fileName)
+                .font(.system(size: 10))
+                .lineLimit(1)
+
+            Spacer()
+
+            Text(transfer.state.rawValue)
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 2)
     }
 }

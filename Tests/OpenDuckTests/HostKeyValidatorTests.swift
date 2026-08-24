@@ -51,4 +51,21 @@ import Crypto
         #expect(!validator.mismatchDetected)
         #expect(validator.validatedFingerprint == nil)
     }
+
+    @Test func fingerprintNormalizationAndLegacyPaddedHealing() {
+        let padded = "SHA256:XusFL7Hj8Djw0EkH/vtG5YdVTPlsfKeHG7PF+WNdfpk="
+        let unpadded = "SHA256:XusFL7Hj8Djw0EkH/vtG5YdVTPlsfKeHG7PF+WNdfpk"
+
+        #expect(OpenDuckHostKeyValidator.normalizeFingerprint(padded) == unpadded)
+        #expect(OpenDuckHostKeyValidator.normalizeFingerprint(unpadded) == unpadded)
+
+        let dbURL = tempDBDir.appendingPathComponent("test_heal.sqlite")
+        let db = MetadataDatabase(databaseURL: dbURL)
+
+        // Simulate legacy pin with trailing '='
+        db.pinHostKey(host: "legacy.example.com", port: 22, keyType: "ssh-ed25519", fingerprint: padded)
+
+        let retrieved = db.pinnedFingerprint(forHost: "legacy.example.com", port: 22)
+        #expect(retrieved == unpadded) // Auto-healed on insert and migration
+    }
 }

@@ -221,9 +221,8 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             }
         }
 
-        let localData = try Data(contentsOf: localURL)
-        var buffer = ByteBufferAllocator().buffer(capacity: localData.count)
-        buffer.writeBytes(localData)
+        progress?.totalUnitCount = localSize
+        progress?.completedUnitCount = 0
 
         // Atomic Staging: upload to staging file first
         let stagingSuffix = ".openduck_staging_\(UUID().uuidString.prefix(8))"
@@ -233,8 +232,28 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             filePath: stagingRemotePath,
             flags: [.write, .create, .truncate]
         )
-        try await stagingFile.write(buffer)
-        try await stagingFile.close()
+
+        do {
+            let fileHandle = try FileHandle(forReadingFrom: localURL)
+            defer { try? fileHandle.close() }
+
+            let chunkSize = 128 * 1024 // 128 KB streaming chunks
+            var offset: UInt64 = 0
+
+            while let chunk = try fileHandle.read(upToCount: chunkSize), !chunk.isEmpty {
+                var buffer = ByteBufferAllocator().buffer(capacity: chunk.count)
+                buffer.writeBytes(chunk)
+                try await stagingFile.write(buffer, at: offset)
+                offset += UInt64(chunk.count)
+                progress?.completedUnitCount = Int64(offset)
+            }
+
+            try await stagingFile.close()
+        } catch {
+            try? await stagingFile.close()
+            try? await sftp.remove(at: stagingRemotePath)
+            throw error
+        }
 
         // Atomic Rename staging -> final destination
         do {
@@ -244,8 +263,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             throw AdapterError.networkError("SFTP atomic commit failed: \(error.localizedDescription)")
         }
 
-        progress?.completedUnitCount = 100
-        progress?.totalUnitCount = 100
+        progress?.completedUnitCount = localSize
     }
 
     public func download(remotePath: String, to localURL: URL, progress: Progress?) async throws {
@@ -253,6 +271,11 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
         let resolved = resolvePath(remotePath)
 
         let remoteFile = try await sftp.openFile(filePath: resolved, flags: [.read])
+        let attrs = try? await sftp.getAttributes(at: resolved)
+        let totalSize = Int64(attrs?.size ?? 0)
+        progress?.totalUnitCount = totalSize
+        progress?.completedUnitCount = 0
+
         let byteBuffer = try await remoteFile.readAll()
         try await remoteFile.close()
 
@@ -266,8 +289,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
         _ = try? FileManager.default.removeItem(at: localURL)
         try FileManager.default.moveItem(at: tempURL, to: localURL)
 
-        progress?.completedUnitCount = 100
-        progress?.totalUnitCount = 100
+        progress?.completedUnitCount = totalSize > 0 ? totalSize : Int64(data.count)
     }
 
     public func createDirectory(path: String) async throws {

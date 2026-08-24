@@ -20,6 +20,8 @@ public final class AppViewModel: ObservableObject {
     @Published public var cacheStats: CacheStatistics = .empty
     @Published public var statusMessage: String? = nil
     @Published public var isMounting: Bool = false
+    @Published public var activeTransfers: [TransferProgress] = []
+    @Published public var recentTransfers: [TransferProgress] = []
 
     public let connectionManager: ConnectionManager
     public let cacheEngine: CacheEngine
@@ -118,13 +120,19 @@ public final class AppViewModel: ObservableObject {
                 remoteRootPath: profile.remoteRootPath,
                 adapter: adapter,
                 cacheEngine: cacheEngine,
-                isReadOnly: profile.isReadOnly
-            ) { [weak self] status in
-                Task { @MainActor in
-                    self?.statusMessage = status
-                    self?.refreshCacheStats()
+                isReadOnly: profile.isReadOnly,
+                onStatusChange: { [weak self] status in
+                    Task { @MainActor in
+                        self?.statusMessage = status
+                        self?.refreshCacheStats()
+                    }
+                },
+                onTransferUpdate: { [weak self] transfer in
+                    Task { @MainActor in
+                        self?.handleTransferUpdate(transfer)
+                    }
                 }
-            }
+            )
 
             mountedDomainIDs.insert(profile.id)
             let modeBadge = profile.isReadOnly ? " [Read-Only]" : ""
@@ -223,6 +231,33 @@ public final class AppViewModel: ObservableObject {
             Task { @MainActor [weak self] in
                 self?.refreshCacheStats()
                 self?.refreshMountedVolumes()
+            }
+        }
+    }
+
+    // MARK: - Live Transfer Metrics
+    
+    public var totalTransferSpeedFormatted: String? {
+        let activeSpeed = activeTransfers.reduce(0.0) { $0 + $1.bytesPerSecond }
+        guard activeSpeed > 1024 else { return nil }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return "\(formatter.string(fromByteCount: Int64(activeSpeed)))/s"
+    }
+
+    public func handleTransferUpdate(_ progress: TransferProgress) {
+        if progress.state == .completed || progress.state == .failed {
+            activeTransfers.removeAll { $0.id == progress.id }
+            recentTransfers.removeAll { $0.id == progress.id }
+            recentTransfers.insert(progress, at: 0)
+            if recentTransfers.count > 5 {
+                recentTransfers = Array(recentTransfers.prefix(5))
+            }
+        } else {
+            if let index = activeTransfers.firstIndex(where: { $0.id == progress.id }) {
+                activeTransfers[index] = progress
+            } else {
+                activeTransfers.append(progress)
             }
         }
     }

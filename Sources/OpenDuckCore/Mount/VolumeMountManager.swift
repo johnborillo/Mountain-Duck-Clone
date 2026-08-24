@@ -352,7 +352,8 @@ public final class VolumeMountManager: @unchecked Sendable {
         adapter: RemoteFilesystemAdapter,
         cacheEngine: CacheEngine,
         isReadOnly: Bool = false,
-        onStatusChange: (@Sendable (String) -> Void)? = nil
+        onStatusChange: (@Sendable (String) -> Void)? = nil,
+        onTransferUpdate: (@Sendable (TransferProgress) -> Void)? = nil
     ) {
         let cleanName = name.replacingOccurrences(of: "/", with: "-")
         stopWatching(name: cleanName)
@@ -364,7 +365,8 @@ public final class VolumeMountManager: @unchecked Sendable {
             cacheEngine: cacheEngine,
             manager: self,
             isReadOnly: isReadOnly,
-            onStatusChange: onStatusChange
+            onStatusChange: onStatusChange,
+            onTransferUpdate: onTransferUpdate
         )
         let contextPtr = Unmanaged.passRetained(context).toOpaque()
 
@@ -431,6 +433,7 @@ public final class WatcherContext: @unchecked Sendable {
     public let manager: VolumeMountManager
     public let isReadOnly: Bool
     public let onStatusChange: (@Sendable (String) -> Void)?
+    public let onTransferUpdate: (@Sendable (TransferProgress) -> Void)?
 
     private var pendingPaths = Set<String>()
     private var syncDebounceWorkItems: [String: DispatchWorkItem] = [:]
@@ -456,7 +459,8 @@ public final class WatcherContext: @unchecked Sendable {
         cacheEngine: CacheEngine,
         manager: VolumeMountManager,
         isReadOnly: Bool = false,
-        onStatusChange: (@Sendable (String) -> Void)? = nil
+        onStatusChange: (@Sendable (String) -> Void)? = nil,
+        onTransferUpdate: (@Sendable (TransferProgress) -> Void)? = nil
     ) {
         self.volumeURL = volumeURL
         self.remoteRootPath = remoteRootPath
@@ -465,6 +469,7 @@ public final class WatcherContext: @unchecked Sendable {
         self.manager = manager
         self.isReadOnly = isReadOnly
         self.onStatusChange = onStatusChange
+        self.onTransferUpdate = onTransferUpdate
     }
 
     public func resetCircuitBreaker() {
@@ -636,15 +641,31 @@ public final class WatcherContext: @unchecked Sendable {
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
                 Task {
+                    let tracker = TransferTracker(
+                        localURL: localURL,
+                        remotePath: remotePath,
+                        direction: .upload,
+                        totalBytes: fileSize,
+                        onUpdate: self.onTransferUpdate
+                    )
+
+                    let progress = Progress(totalUnitCount: fileSize)
+                    let observation = progress.observe(\.completedUnitCount) { p, _ in
+                        tracker.update(bytesTransferred: p.completedUnitCount)
+                    }
+
                     do {
                         self.onStatusChange?("Uploading \(filename)...")
-                        try await self.adapter.upload(from: localURL, to: remotePath, progress: nil)
+                        try await self.adapter.upload(from: localURL, to: remotePath, progress: progress)
+                        tracker.markCompleted()
                         self.cacheEngine.markClean(itemIdentifier: itemId, remotePath: remotePath)
                         MetadataDatabase.shared.markClean(localPath: localPath, remoteMtime: Date(), size: fileSize)
                         self.onStatusChange?("✓ Uploaded \(filename)")
                     } catch {
+                        tracker.markFailed(error: error)
                         self.onStatusChange?("🛑 Safety/Upload notice: \(error.localizedDescription)")
                     }
+                    _ = observation
                 }
             }
             syncDebounceWorkItems[remotePath] = workItem

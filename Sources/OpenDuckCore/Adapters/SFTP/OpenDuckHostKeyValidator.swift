@@ -50,6 +50,14 @@ public final class OpenDuckHostKeyValidator: NIOSSHClientServerAuthenticationDel
         self.onPin = onPin
     }
 
+    public static func normalizeFingerprint(_ fp: String) -> String {
+        var clean = fp.trimmingCharacters(in: .whitespacesAndNewlines)
+        while clean.hasSuffix("=") {
+            clean.removeLast()
+        }
+        return clean
+    }
+
     public func validateHostKey(
         hostKey: NIOSSHPublicKey,
         validationCompletePromise: EventLoopPromise<Void>
@@ -64,7 +72,8 @@ public final class OpenDuckHostKeyValidator: NIOSSHClientServerAuthenticationDel
         let keyType = parts.first.map(String.init) ?? "unknown"
         let hash = SHA256.hash(data: rawData)
         // Standard OpenSSH format: SHA256 base64 digest with trailing '=' padding removed
-        let fingerprint = "SHA256:" + Data(hash).base64EncodedString().replacingOccurrences(of: "=", with: "")
+        let rawBase64 = Data(hash).base64EncodedString()
+        let fingerprint = Self.normalizeFingerprint("SHA256:" + rawBase64)
 
         lock.lock()
         _validatedFingerprint = fingerprint
@@ -73,23 +82,33 @@ public final class OpenDuckHostKeyValidator: NIOSSHClientServerAuthenticationDel
         let existingPinned = MetadataDatabase.shared.pinnedFingerprint(forHost: host, port: port)
 
         if let pinned = existingPinned {
-            if pinned == fingerprint {
-                // Key matches pinned fingerprint -> Accept
+            let normalizedPinned = Self.normalizeFingerprint(pinned)
+            if normalizedPinned == fingerprint {
+                // Key matches pinned fingerprint!
+                // If legacy DB stored the fingerprint with trailing '=', heal/update it to canonical format
+                if pinned != fingerprint {
+                    MetadataDatabase.shared.pinHostKey(
+                        host: host,
+                        port: port,
+                        keyType: keyType,
+                        fingerprint: fingerprint
+                    )
+                }
                 validationCompletePromise.succeed(())
             } else {
                 // Host key mismatch! Possible MITM attack -> Reject immediately
                 lock.lock()
                 _mismatchDetected = true
-                _expectedFingerprint = pinned
+                _expectedFingerprint = normalizedPinned
                 lock.unlock()
 
                 print("🛑 [OpenDuck Security] HOST KEY MISMATCH for \(host):\(port)!")
-                print("   Expected pinned: \(pinned)")
+                print("   Expected pinned: \(normalizedPinned)")
                 print("   Presented key:   \(fingerprint)")
                 validationCompletePromise.fail(HostKeyMismatchError(
                     host: host,
                     port: port,
-                    expectedFingerprint: pinned,
+                    expectedFingerprint: normalizedPinned,
                     receivedFingerprint: fingerprint
                 ))
             }

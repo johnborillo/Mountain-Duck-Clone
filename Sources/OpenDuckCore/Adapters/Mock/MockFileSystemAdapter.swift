@@ -121,13 +121,16 @@ public final class MockFileSystemAdapter: RemoteFilesystemAdapter, @unchecked Se
         }
 
         try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        progress?.totalUnitCount = Int64(data.count)
+        progress?.completedUnitCount = 0
         try data.write(to: localURL, options: .atomic)
         progress?.completedUnitCount = Int64(data.count)
-        progress?.totalUnitCount = Int64(data.count)
     }
 
     public func upload(from localURL: URL, to remotePath: String, progress: Progress?) async throws {
         let data = try Data(contentsOf: localURL)
+        progress?.totalUnitCount = Int64(data.count)
+        progress?.completedUnitCount = 0
         try await simulateNetwork()
 
         try sync {
@@ -153,7 +156,6 @@ public final class MockFileSystemAdapter: RemoteFilesystemAdapter, @unchecked Se
         }
 
         progress?.completedUnitCount = Int64(data.count)
-        progress?.totalUnitCount = Int64(data.count)
     }
 
     public func createDirectory(path: String) async throws {
