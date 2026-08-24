@@ -1,0 +1,13 @@
+{
+  "": {
+    "dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/release/OpenMountainDuckExtension.build/OpenMountainDuckExtension.d",
+    "object": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/release/OpenMountainDuckExtension.build/OpenMountainDuckExtension.o",
+    "swift-dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/release/OpenMountainDuckExtension.build/primary.swiftdeps"
+  },
+  "/Users/johnborillo/Documents/Mountain Duck Clone/Sources/OpenMountainDuckExtension/main.swift": {
+    "object": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/release/OpenMountainDuckExtension.build/main.swift.o",
+    "swiftmodule": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/release/OpenMountainDuckExtension.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/release/OpenMountainDuckExtension.build/main.swiftdeps",
+    "diagnostics": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/release/OpenMountainDuckExtension.build/main.dia"
+  }
+}

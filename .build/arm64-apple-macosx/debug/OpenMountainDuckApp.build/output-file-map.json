@@ -1,0 +1,40 @@
+{
+  "": {
+    "swift-dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/primary.swiftdeps"
+  },
+  "/Users/johnborillo/Documents/Mountain Duck Clone/Sources/OpenMountainDuckApp/OpenMountainDuckApp.swift": {
+    "dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/OpenMountainDuckApp.d",
+    "object": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/OpenMountainDuckApp.swift.o",
+    "swiftmodule": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/OpenMountainDuckApp~partial.swiftmodule",
+    "swift-dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/OpenMountainDuckApp.swiftdeps",
+    "diagnostics": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/OpenMountainDuckApp.dia"
+  },
+  "/Users/johnborillo/Documents/Mountain Duck Clone/Sources/OpenMountainDuckApp/ViewModels/AppViewModel.swift": {
+    "dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/AppViewModel.d",
+    "object": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/AppViewModel.swift.o",
+    "swiftmodule": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/AppViewModel~partial.swiftmodule",
+    "swift-dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/AppViewModel.swiftdeps",
+    "diagnostics": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/AppViewModel.dia"
+  },
+  "/Users/johnborillo/Documents/Mountain Duck Clone/Sources/OpenMountainDuckApp/Views/AddEditConnectionSheet.swift": {
+    "dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/AddEditConnectionSheet.d",
+    "object": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/AddEditConnectionSheet.swift.o",
+    "swiftmodule": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/AddEditConnectionSheet~partial.swiftmodule",
+    "swift-dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/AddEditConnectionSheet.swiftdeps",
+    "diagnostics": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/AddEditConnectionSheet.dia"
+  },
+  "/Users/johnborillo/Documents/Mountain Duck Clone/Sources/OpenMountainDuckApp/Views/MenuBarView.swift": {
+    "dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/MenuBarView.d",
+    "object": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/MenuBarView.swift.o",
+    "swiftmodule": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/MenuBarView~partial.swiftmodule",
+    "swift-dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/MenuBarView.swiftdeps",
+    "diagnostics": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/MenuBarView.dia"
+  },
+  "/Users/johnborillo/Documents/Mountain Duck Clone/Sources/OpenMountainDuckApp/Views/PreferencesView.swift": {
+    "dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/PreferencesView.d",
+    "object": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/PreferencesView.swift.o",
+    "swiftmodule": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/PreferencesView~partial.swiftmodule",
+    "swift-dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/PreferencesView.swiftdeps",
+    "diagnostics": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckApp.build/PreferencesView.dia"
+  }
+}

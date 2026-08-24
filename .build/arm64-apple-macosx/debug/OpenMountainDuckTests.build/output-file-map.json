@@ -1,0 +1,33 @@
+{
+  "": {
+    "swift-dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/primary.swiftdeps"
+  },
+  "/Users/johnborillo/Documents/Mountain Duck Clone/Tests/OpenMountainDuckTests/CacheEngineTests.swift": {
+    "dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/CacheEngineTests.d",
+    "object": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/CacheEngineTests.swift.o",
+    "swiftmodule": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/CacheEngineTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/CacheEngineTests.swiftdeps",
+    "diagnostics": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/CacheEngineTests.dia"
+  },
+  "/Users/johnborillo/Documents/Mountain Duck Clone/Tests/OpenMountainDuckTests/ConnectionManagerTests.swift": {
+    "dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/ConnectionManagerTests.d",
+    "object": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/ConnectionManagerTests.swift.o",
+    "swiftmodule": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/ConnectionManagerTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/ConnectionManagerTests.swiftdeps",
+    "diagnostics": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/ConnectionManagerTests.dia"
+  },
+  "/Users/johnborillo/Documents/Mountain Duck Clone/Tests/OpenMountainDuckTests/FileProviderItemTests.swift": {
+    "dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/FileProviderItemTests.d",
+    "object": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/FileProviderItemTests.swift.o",
+    "swiftmodule": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/FileProviderItemTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/FileProviderItemTests.swiftdeps",
+    "diagnostics": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/FileProviderItemTests.dia"
+  },
+  "/Users/johnborillo/Documents/Mountain Duck Clone/Tests/OpenMountainDuckTests/MockAdapterTests.swift": {
+    "dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/MockAdapterTests.d",
+    "object": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/MockAdapterTests.swift.o",
+    "swiftmodule": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/MockAdapterTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/MockAdapterTests.swiftdeps",
+    "diagnostics": "/Users/johnborillo/Documents/Mountain Duck Clone/.build/arm64-apple-macosx/debug/OpenMountainDuckTests.build/MockAdapterTests.dia"
+  }
+}
