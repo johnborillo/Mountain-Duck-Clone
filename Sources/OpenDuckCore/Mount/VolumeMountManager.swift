@@ -155,6 +155,7 @@ public final class VolumeMountManager: @unchecked Sendable {
 
         let remoteItems = try await adapter.listDirectory(path: remotePath)
         let remoteNames = Set(remoteItems.map { $0.name })
+        let volumeName = localURL.pathComponents.count > 2 ? localURL.pathComponents[2] : "OpenDuck"
 
         // 1. Reconcile Remote -> Local: Add new remote items or placeholders
         for item in remoteItems {
@@ -177,6 +178,14 @@ public final class VolumeMountManager: @unchecked Sendable {
                     }
                     Self.setPlaceholderXAttr(path: localItemURL.path)
                     sync { knownPlaceholders.insert(localItemURL.path) }
+                    MetadataDatabase.shared.markPlaceholder(
+                        localPath: localItemURL.path,
+                        remotePath: item.path,
+                        volumeName: volumeName,
+                        fileName: item.name,
+                        size: item.size,
+                        remoteMtime: item.modificationDate
+                    )
                 }
                 if isReadOnly {
                     try? FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: localItemURL.path)
@@ -202,6 +211,7 @@ public final class VolumeMountManager: @unchecked Sendable {
                         try? FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: localItemURL.path)
                         try? FileManager.default.removeItem(at: localItemURL)
                         sync { knownPlaceholders.remove(localItemURL.path) }
+                        MetadataDatabase.shared.deleteRecord(localPath: localItemURL.path)
                         try? cacheEngine.evict(itemIdentifier: itemId)
                     }
                 }
@@ -240,11 +250,15 @@ public final class VolumeMountManager: @unchecked Sendable {
     }
 
     public func isPlaceholder(path: String) -> Bool {
-        sync { knownPlaceholders.contains(path) }
+        if MetadataDatabase.shared.isPlaceholder(localPath: path) {
+            return true
+        }
+        return sync { knownPlaceholders.contains(path) } || Self.isPlaceholderXAttr(path: path)
     }
 
     public func removePlaceholder(path: String) {
         sync { knownPlaceholders.remove(path) }
+        MetadataDatabase.shared.markMaterialized(localPath: path)
     }
 
     public func markPopulated(remotePath: String) {
@@ -381,10 +395,11 @@ public final class VolumeMountManager: @unchecked Sendable {
 
     public func stopWatching(name: String) {
         let cleanName = name.replacingOccurrences(of: "/", with: "-")
-        let stream: FSEventStreamRef? = sync {
-            _ = activeContexts.removeValue(forKey: cleanName)
-            return activeStreams.removeValue(forKey: cleanName)
-        }
+        let context: WatcherContext? = sync { activeContexts.removeValue(forKey: cleanName) }
+        let stream: FSEventStreamRef? = sync { activeStreams.removeValue(forKey: cleanName) }
+
+        context?.invalidate()
+
         if let stream = stream {
             FSEventStreamStop(stream)
             FSEventStreamInvalidate(stream)
@@ -418,7 +433,18 @@ private final class WatcherContext {
     private var syncDebounceWorkItems: [String: DispatchWorkItem] = [:]
     private var deletionTimestamps: [Date] = []
     private(set) var isCircuitBreakerTripped: Bool = false
+    private var isStopped: Bool = false
     private let lock = NSLock()
+
+    func invalidate() {
+        lock.lock()
+        isStopped = true
+        for (_, item) in syncDebounceWorkItems {
+            item.cancel()
+        }
+        syncDebounceWorkItems.removeAll()
+        lock.unlock()
+    }
 
     init(
         volumeURL: URL,
@@ -467,6 +493,9 @@ private final class WatcherContext {
     }
 
     func handleEvent(localPath: String, flags: UInt32) {
+        let stopped: Bool = lock.withLock { isStopped }
+        guard !stopped else { return }
+
         let volumePath = volumeURL.path
         guard localPath.hasPrefix(volumePath) else { return }
 
@@ -584,6 +613,7 @@ private final class WatcherContext {
             _ = cacheEngine.registerPlaceholder(for: entry)
             let itemId = cacheEngine.itemIdentifier(for: remotePath)
             cacheEngine.markDirty(itemIdentifier: itemId, newLocalURL: localURL)
+            MetadataDatabase.shared.markDirty(localPath: localPath)
 
             // Debounce upload by 800ms
             lock.lock()
@@ -595,6 +625,7 @@ private final class WatcherContext {
                         self.onStatusChange?("Uploading \(filename)...")
                         try await self.adapter.upload(from: localURL, to: remotePath, progress: nil)
                         self.cacheEngine.markClean(itemIdentifier: itemId, remotePath: remotePath)
+                        MetadataDatabase.shared.markClean(localPath: localPath, remoteMtime: Date(), size: fileSize)
                         self.onStatusChange?("✓ Uploaded \(filename)")
                     } catch {
                         self.onStatusChange?("🛑 Safety/Upload notice: \(error.localizedDescription)")
@@ -625,6 +656,7 @@ private final class WatcherContext {
                     let itemId = self.cacheEngine.itemIdentifier(for: remotePath)
                     try? self.cacheEngine.evict(itemIdentifier: itemId)
                     self.manager.removePlaceholder(path: localPath)
+                    MetadataDatabase.shared.deleteRecord(localPath: localPath)
                     self.onStatusChange?("✓ Deleted \(filename)")
                 } catch {
                     // Ignore if already deleted on remote server

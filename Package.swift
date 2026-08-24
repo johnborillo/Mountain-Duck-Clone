@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "OpenDuck",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     products: [
         .library(
@@ -24,9 +24,15 @@ let package = Package(
             targets: ["OpenDuckCLI"]
         )
     ],
+    dependencies: [
+        .package(url: "https://github.com/orlandos-nl/Citadel.git", from: "0.7.0")
+    ],
     targets: [
         .target(
             name: "OpenDuckCore",
+            dependencies: [
+                .product(name: "Citadel", package: "Citadel")
+            ],
             path: "Sources/OpenDuckCore",
             swiftSettings: [
                 .swiftLanguageMode(.v5)

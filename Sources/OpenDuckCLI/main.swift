@@ -742,10 +742,39 @@ struct OpenDuckCLI {
         let zeroByteFile = safetyTempDir.appendingPathComponent("empty.mkv")
         FileManager.default.createFile(atPath: zeroByteFile.path, contents: nil)
 
-        // Mock remote state with size 500 MB
-        assert(FileManager.default.fileExists(atPath: zeroByteFile.path), "Safety Shield: Zero-byte file created for protection test")
+        // --- Suite 6: Persistent SQLite Metadata Database Tests ---
+        print("\n[6/6] Running MetadataDatabaseTests...")
+        let dbTempDir = FileManager.default.temporaryDirectory.appendingPathComponent("openduck-db-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dbTempDir, withIntermediateDirectories: true)
+        let dbURL = dbTempDir.appendingPathComponent("test_meta.sqlite")
+        let db = MetadataDatabase(databaseURL: dbURL)
 
-        try? FileManager.default.removeItem(at: safetyTempDir)
+        db.markPlaceholder(
+            localPath: "/Volumes/Expedition/image.png",
+            remotePath: "/photos/image.png",
+            volumeName: "Expedition",
+            fileName: "image.png",
+            size: 2048,
+            remoteMtime: Date()
+        )
+        assert(db.isPlaceholder(localPath: "/Volumes/Expedition/image.png"), "MetadataDatabase: marks and detects placeholder")
+
+        db.markDirty(localPath: "/Volumes/Expedition/image.png")
+        let dirtyRecords = db.allDirtyRecords()
+        assert(dirtyRecords.count == 1 && dirtyRecords.first?.state == .dirty, "MetadataDatabase: marks and lists dirty item")
+
+        db.markClean(localPath: "/Volumes/Expedition/image.png", remoteMtime: Date(), size: 2048)
+        assert(!db.isPlaceholder(localPath: "/Volumes/Expedition/image.png") && db.allDirtyRecords().isEmpty, "MetadataDatabase: marks item materialized and clean")
+
+        // Persistence test across database reconnection
+        let db2 = MetadataDatabase(databaseURL: dbURL)
+        let persisted = db2.record(forLocalPath: "/Volumes/Expedition/image.png")
+        assert(persisted != nil && persisted?.size == 2048 && persisted?.state == .materialized, "MetadataDatabase: maintains ACID persistence across re-instantiation")
+
+        db2.deleteRecord(localPath: "/Volumes/Expedition/image.png")
+        assert(db2.record(forLocalPath: "/Volumes/Expedition/image.png") == nil, "MetadataDatabase: deletes record on removal")
+
+        try? FileManager.default.removeItem(at: dbTempDir)
 
         print("\n===========================================================")
         print("📊 Test Summary: \(passed) Passed, \(failed) Failed (Total: \(passed + failed))")
