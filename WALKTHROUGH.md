@@ -1,4 +1,4 @@
-# Walkthrough: OpenMountainDuck Native `/Volumes` Integration & Deep Recursive Sync
+# Walkthrough: OpenDuck Native `/Volumes` Integration & Deep Recursive Sync
 
 ### 🔍 Diagnostic: Subfolder Emptiness & Container Path
 1. **Empty Subfolders:** Previously, the mount routine only executed a shallow single-level `listDirectory("/")`. Any detected directory (like `data-storage`) was created locally as a folder shell, but its child items were not fetched.
@@ -8,7 +8,7 @@
 
 ### 🔧 Architecture Upgrade: Native `/Volumes` & Deep Sync Engine
 
-1. **Native `/Volumes` Mount Point ([`VolumeMountManager.swift`](file:///Users/johnborillo/Documents/Mountain%20Duck%20Clone/Sources/OpenMountainDuckCore/Mount/VolumeMountManager.swift)):**
+1. **Native `/Volumes` Mount Point ([`VolumeMountManager.swift`](file:///Users/johnborillo/Documents/Mountain%20Duck%20Clone/Sources/OpenDuckCore/Mount/VolumeMountManager.swift)):**
    * Uses native macOS virtual volume mounting at `/Volumes/<ProfileName>`.
    * **Finder Locations Integration:** macOS automatically registers `/Volumes/<ProfileName>` directly under the **Locations** section in the Finder sidebar (alongside your Macintosh HD and network drives) with an unmount/eject icon.
 2. **Recursive Tree Synchronization (`syncTree`):**

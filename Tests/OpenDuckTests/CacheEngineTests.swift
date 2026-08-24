@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import OpenMountainDuckCore
+@testable import OpenDuckCore
 
 final class CacheEngineTests: XCTestCase {
     var tempCacheDir: URL!

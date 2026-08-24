@@ -2,65 +2,76 @@
 import PackageDescription
 
 let package = Package(
-    name: "OpenMountainDuck",
+    name: "OpenDuck",
     platforms: [
         .macOS(.v13)
     ],
     products: [
         .library(
-            name: "OpenMountainDuckCore",
-            targets: ["OpenMountainDuckCore"]
+            name: "OpenDuckCore",
+            targets: ["OpenDuckCore"]
         ),
         .executable(
-            name: "OpenMountainDuckApp",
-            targets: ["OpenMountainDuckApp"]
+            name: "OpenDuckApp",
+            targets: ["OpenDuckApp"]
         ),
         .executable(
-            name: "OpenMountainDuckExtension",
-            targets: ["OpenMountainDuckExtension"]
+            name: "OpenDuckExtension",
+            targets: ["OpenDuckExtension"]
         ),
         .executable(
-            name: "omd",
-            targets: ["OpenMountainDuckCLI"]
+            name: "openduck",
+            targets: ["OpenDuckCLI"]
         )
     ],
     targets: [
         .target(
-            name: "OpenMountainDuckCore",
-            path: "Sources/OpenMountainDuckCore",
+            name: "OpenDuckCore",
+            path: "Sources/OpenDuckCore",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
         ),
         .executableTarget(
-            name: "OpenMountainDuckApp",
+            name: "OpenDuckApp",
             dependencies: [
-                "OpenMountainDuckCore"
+                "OpenDuckCore"
             ],
-            path: "Sources/OpenMountainDuckApp",
+            path: "Sources/OpenDuckApp",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
         ),
         .executableTarget(
-            name: "OpenMountainDuckExtension",
+            name: "OpenDuckExtension",
             dependencies: [
-                "OpenMountainDuckCore"
+                "OpenDuckCore"
             ],
-            path: "Sources/OpenMountainDuckExtension",
+            path: "Sources/OpenDuckExtension",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
         ),
         .executableTarget(
-            name: "OpenMountainDuckCLI",
+            name: "OpenDuckCLI",
             dependencies: [
-                "OpenMountainDuckCore"
+                "OpenDuckCore"
             ],
-            path: "Sources/OpenMountainDuckCLI",
+            path: "Sources/OpenDuckCLI",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "OpenDuckTests",
+            dependencies: [
+                "OpenDuckCore"
+            ],
+            path: "Tests/OpenDuckTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
         )
     ]
 )
+

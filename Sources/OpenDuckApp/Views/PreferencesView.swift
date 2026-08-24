@@ -1,5 +1,5 @@
 import SwiftUI
-import OpenMountainDuckCore
+import OpenDuckCore
 
 /// Preferences view rendered in-place within the menu bar popover.
 public struct PreferencesView: View {
@@ -88,7 +88,7 @@ public struct PreferencesView: View {
 
                     // About
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("OpenMountainDuck 1.0.0 (Open-Source)")
+                        Text("OpenDuck 1.0.0 (Open-Source)")
                             .font(.caption).bold()
                         Text("Native macOS Remote Cloud Filesystem Mounter")
                             .font(.caption2)

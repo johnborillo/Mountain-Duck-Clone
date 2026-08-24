@@ -1,5 +1,5 @@
 import SwiftUI
-import OpenMountainDuckCore
+import OpenDuckCore
 import AppKit
 
 /// Form view for configuring new remote server connections with clean native layout.

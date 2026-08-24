@@ -1,10 +1,10 @@
 import Foundation
 import FileProvider
-import OpenMountainDuckCore
+import OpenDuckCore
 
 // Entry point for the FileProvider app extension runtime
 @main
-struct OpenMountainDuckExtensionMain {
+struct OpenDuckExtensionMain {
     static func main() {
         // macOS File Provider extension runtime lifecycle
         // Handled by Apple's FileProvider.framework XPC listener

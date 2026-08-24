@@ -11,7 +11,7 @@ public final class VolumeMountManager: @unchecked Sendable {
 
     public init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("OpenMountainDuck/Volumes")
+            .appendingPathComponent("OpenDuck/Volumes")
         self.baseStorageDir = appSupport
         try? FileManager.default.createDirectory(at: baseStorageDir, withIntermediateDirectories: true)
     }

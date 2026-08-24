@@ -1,10 +1,10 @@
 import Foundation
-import OpenMountainDuckCore
+import OpenDuckCore
 import FileProvider
 import UniformTypeIdentifiers
 
 @main
-struct OpenMountainDuckCLI {
+struct OpenDuckCLI {
     static func main() async {
         let args = CommandLine.arguments
 
@@ -35,14 +35,14 @@ struct OpenMountainDuckCLI {
             if args.count > 2 {
                 await mountDomain(name: args[2])
             } else {
-                print("Error: Missing domain name. Usage: omd mount <name>")
+                print("Error: Missing domain name. Usage: openduck mount <name>")
             }
 
         case "unmount":
             if args.count > 2 {
                 await unmountDomain(name: args[2])
             } else {
-                print("Error: Missing domain name. Usage: omd unmount <name>")
+                print("Error: Missing domain name. Usage: openduck unmount <name>")
             }
 
         case "help", "--help", "-h":
@@ -57,7 +57,7 @@ struct OpenMountainDuckCLI {
     static func printUsage() {
         print("""
         ===========================================================
-        🦆 OpenMountainDuck CLI (omd) - Native macOS Cloud Mounter
+        🦆 OpenDuck CLI (openduck) - Native macOS Cloud Mounter
         ===========================================================
 
         Commands:
@@ -180,7 +180,7 @@ struct OpenMountainDuckCLI {
     }
 
     static func runFullTestSuite() async {
-        print("🧪 Executing OpenMountainDuck Complete Test Suite...\n")
+        print("🧪 Executing OpenDuck Complete Test Suite...\n")
         var passed = 0
         var failed = 0
 
@@ -298,7 +298,7 @@ struct OpenMountainDuckCLI {
     }
 
     static func runMockSimulation() async {
-        print("🦆 Starting OpenMountainDuck End-to-End Simulation...")
+        print("🦆 Starting OpenDuck End-to-End Simulation...")
 
         let mockAdapter = MockFileSystemAdapter(endpointDescription: "mock://expedition33.server")
         do {
@@ -322,7 +322,7 @@ struct OpenMountainDuckCLI {
                 print("      - [\(item.itemType.rawValue)] \(item.name) (\(item.size) bytes)")
             }
 
-            let cacheDir = FileManager.default.temporaryDirectory.appendingPathComponent("omd-test-cache-\(UUID().uuidString)")
+            let cacheDir = FileManager.default.temporaryDirectory.appendingPathComponent("openduck-test-cache-\(UUID().uuidString)")
             let cacheEngine = CacheEngine(cacheDirectory: cacheDir)
             let fileId = cacheEngine.itemIdentifier(for: "/documents/manifest.txt")
 
@@ -343,7 +343,7 @@ struct OpenMountainDuckCLI {
             print("  ✓ Synchronizing dirty writes to remote adapter...")
             try await cacheEngine.syncPendingWrites(with: mockAdapter)
 
-            let updatedURL = FileManager.default.temporaryDirectory.appendingPathComponent("omd-verify-\(UUID().uuidString)")
+            let updatedURL = FileManager.default.temporaryDirectory.appendingPathComponent("openduck-verify-\(UUID().uuidString)")
             try await mockAdapter.download(remotePath: "/documents/manifest.txt", to: updatedURL, progress: nil)
             let verifiedContent = try String(contentsOf: updatedURL, encoding: .utf8)
             print("  ✓ Verified remote server received update:")
@@ -366,7 +366,7 @@ struct OpenMountainDuckCLI {
             print("✓ Successfully mounted '\(name)' domain into Finder.")
         } catch {
             print("Note: Domain registration returned: \(error.localizedDescription)")
-            print("If running outside an app bundle container, use the OpenMountainDuck host app.")
+            print("If running outside an app bundle container, use the OpenDuck host app.")
         }
     }
 

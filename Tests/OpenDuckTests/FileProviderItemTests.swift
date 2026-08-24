@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 import FileProvider
 import UniformTypeIdentifiers
-@testable import OpenMountainDuckCore
+@testable import OpenDuckCore
 
 final class FileProviderItemTests: XCTestCase {
     func testItemCreationFromEntry() {

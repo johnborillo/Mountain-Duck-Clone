@@ -11,7 +11,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     public required init(domain: NSFileProviderDomain) {
         self.domain = domain
         let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("com.openmountainduck.fileprovider/\(domain.identifier.rawValue)")
+            .appendingPathComponent("com.openduck.fileprovider/\(domain.identifier.rawValue)")
         self.cacheEngine = CacheEngine(cacheDirectory: cacheDir)
         self.connectionManager = ConnectionManager.shared
         super.init()

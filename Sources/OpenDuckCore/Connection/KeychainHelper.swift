@@ -4,7 +4,7 @@ import Security
 /// macOS Keychain Services bridge for securely persisting secrets without plain-text disk storage.
 public final class KeychainHelper: Sendable {
     public static let shared = KeychainHelper()
-    private let serviceName = "com.openmountainduck.credentials"
+    private let serviceName = "com.openduck.credentials"
 
     public init() {}
 

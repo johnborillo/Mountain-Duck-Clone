@@ -1,5 +1,5 @@
 import SwiftUI
-import OpenMountainDuckCore
+import OpenDuckCore
 
 /// Main popover view rendered in the macOS Menu Bar.
 public struct MenuBarView: View {
@@ -27,7 +27,7 @@ public struct MenuBarView: View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Text("🦆 OpenMountainDuck")
+                Text("🦆 OpenDuck")
                     .font(.headline)
 
                 Spacer()

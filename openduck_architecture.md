@@ -430,8 +430,8 @@ try await NSFileProviderManager.add(domain)
 ## 6. Project Structure
 
 ```
-OpenMountainDuck/
-├── OpenMountainDuck.xcodeproj
+OpenDuck/
+├── OpenDuck.xcodeproj
 ├── Package.swift                           # SPM dependencies
 │
 ├── App/                                    # Host menu bar application

@@ -3,10 +3,10 @@ set -e
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$PROJECT_ROOT/build"
-APP_BUNDLE="$BUILD_DIR/OpenMountainDuck.app"
-APPEX_BUNDLE="$APP_BUNDLE/Contents/PlugIns/OpenMountainDuckFileProvider.appex"
+APP_BUNDLE="$BUILD_DIR/OpenDuck.app"
+APPEX_BUNDLE="$APP_BUNDLE/Contents/PlugIns/OpenDuckFileProvider.appex"
 
-echo "🦆 Building OpenMountainDuck release binaries..."
+echo "🦆 Building OpenDuck release binaries..."
 cd "$PROJECT_ROOT"
 swift build -c release
 
@@ -18,8 +18,8 @@ mkdir -p "$APPEX_BUNDLE/Contents/MacOS"
 mkdir -p "$APPEX_BUNDLE/Contents/Resources"
 
 # 1. Copy Executables
-cp "$PROJECT_ROOT/.build/release/OpenMountainDuckApp" "$APP_BUNDLE/Contents/MacOS/OpenMountainDuck"
-cp "$PROJECT_ROOT/.build/release/OpenMountainDuckExtension" "$APPEX_BUNDLE/Contents/MacOS/OpenMountainDuckFileProvider"
+cp "$PROJECT_ROOT/.build/release/OpenDuckApp" "$APP_BUNDLE/Contents/MacOS/OpenDuck"
+cp "$PROJECT_ROOT/.build/release/OpenDuckExtension" "$APPEX_BUNDLE/Contents/MacOS/OpenDuckFileProvider"
 
 # 2. Generate Host App Info.plist
 cat << 'PLIST' > "$APP_BUNDLE/Contents/Info.plist"
@@ -30,13 +30,13 @@ cat << 'PLIST' > "$APP_BUNDLE/Contents/Info.plist"
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>OpenMountainDuck</string>
+    <string>OpenDuck</string>
     <key>CFBundleIdentifier</key>
-    <string>com.openmountainduck.app</string>
+    <string>com.openduck.app</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>OpenMountainDuck</string>
+    <string>OpenDuck</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -62,13 +62,13 @@ cat << 'PLIST' > "$APPEX_BUNDLE/Contents/Info.plist"
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>OpenMountainDuckFileProvider</string>
+    <string>OpenDuckFileProvider</string>
     <key>CFBundleIdentifier</key>
-    <string>com.openmountainduck.app.fileprovider</string>
+    <string>com.openduck.app.fileprovider</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>OpenMountainDuckFileProvider</string>
+    <string>OpenDuckFileProvider</string>
     <key>CFBundlePackageType</key>
     <string>XPC!</string>
     <key>CFBundleShortVersionString</key>
@@ -82,7 +82,7 @@ cat << 'PLIST' > "$APPEX_BUNDLE/Contents/Info.plist"
         <key>NSExtensionPointIdentifier</key>
         <string>com.apple.fileprovider-nonui</string>
         <key>NSExtensionFileProviderDocumentGroup</key>
-        <string>group.com.openmountainduck</string>
+        <string>group.com.openduck</string>
         <key>NSExtensionPrincipalClass</key>
         <string>FileProviderExtension</string>
     </dict>
@@ -101,11 +101,11 @@ codesign --force --sign - --entitlements "$PROJECT_ROOT/scripts/Extension.entitl
 codesign --force --sign - "$APP_BUNDLE"
 
 # 5. Install to /Applications for system-wide registration
-echo "📂 Installing to /Applications/OpenMountainDuck.app..."
-rm -rf "/Applications/OpenMountainDuck.app"
-cp -R "$APP_BUNDLE" "/Applications/OpenMountainDuck.app"
+echo "📂 Installing to /Applications/OpenDuck.app..."
+rm -rf "/Applications/OpenDuck.app"
+cp -R "$APP_BUNDLE" "/Applications/OpenDuck.app"
 
 # 6. Register with LaunchServices
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/OpenMountainDuck.app"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/OpenDuck.app"
 
-echo "✓ OpenMountainDuck.app installed to /Applications!"
+echo "✓ OpenDuck.app installed to /Applications!"

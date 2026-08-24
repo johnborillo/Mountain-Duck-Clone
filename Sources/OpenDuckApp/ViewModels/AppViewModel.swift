@@ -1,6 +1,6 @@
 import Foundation
 import SwiftUI
-import OpenMountainDuckCore
+import OpenDuckCore
 import FileProvider
 import AppKit
 
@@ -33,7 +33,7 @@ public final class AppViewModel: ObservableObject {
         self.connectionManager = connectionManager
         self.volumeManager = volumeManager
         let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("com.openmountainduck.app/cache")
+            .appendingPathComponent("com.openduck.app/cache")
         self.cacheEngine = cacheEngine ?? CacheEngine(cacheDirectory: cacheDir)
 
         loadInitialData()

@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import OpenMountainDuckCore
+@testable import OpenDuckCore
 
 final class ConnectionManagerTests: XCTestCase {
     func testProfileRegistrationAndRetrieval() {
