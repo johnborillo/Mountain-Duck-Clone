@@ -108,6 +108,30 @@ public final class UploadJournal: @unchecked Sendable {
         return entries.values.sorted { $0.timestamp < $1.timestamp }
     }
 
+    /// Hold operations for an item after a version conflict. A blocked operation
+    /// remains durable and visible, but replay loops skip it until the user
+    /// explicitly chooses Keep Local or Keep Remote.
+    public func block(itemIdentifier: String, remotePath: String? = nil, retryCount: Int = 10) {
+        updateRetryCount(itemIdentifier: itemIdentifier, remotePath: remotePath, retryCount: retryCount)
+    }
+
+    public func unblock(itemIdentifier: String, remotePath: String? = nil) {
+        updateRetryCount(itemIdentifier: itemIdentifier, remotePath: remotePath, retryCount: 0)
+    }
+
+    private func updateRetryCount(itemIdentifier: String, remotePath: String?, retryCount: Int) {
+        lock.lock()
+        defer {
+            saveToDisk()
+            lock.unlock()
+        }
+        for (id, var entry) in entries {
+            guard entry.itemIdentifier == itemIdentifier || (remotePath != nil && entry.remotePath == remotePath) else { continue }
+            entry.retryCount = retryCount
+            entries[id] = entry
+        }
+    }
+
     public var count: Int {
         lock.lock()
         defer { lock.unlock() }

@@ -87,6 +87,41 @@ public struct PreferencesView: View {
                     .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
                     .cornerRadius(8)
 
+                    // Recovery and support diagnostics
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("RECOVERY & SUPPORT").font(.caption).bold().foregroundColor(.secondary)
+                        HStack {
+                            Label("Queued operations", systemImage: "clock.arrow.circlepath")
+                            Spacer()
+                            Text("\(viewModel.pendingOperations.count)").foregroundColor(.secondary)
+                        }
+                        .font(.caption)
+                        HStack {
+                            Label("Unresolved conflicts", systemImage: "exclamationmark.triangle")
+                            Spacer()
+                            Text("\(viewModel.conflicts.count)").foregroundColor(viewModel.conflicts.isEmpty ? .secondary : .red)
+                        }
+                        .font(.caption)
+                        HStack(spacing: 8) {
+                            Button("Refresh State") {
+                                viewModel.refreshOperationalState()
+                            }
+                            .buttonStyle(.bordered)
+                            .font(.caption)
+                            Button("Export Diagnostics") {
+                                viewModel.exportDiagnostics()
+                            }
+                            .buttonStyle(.bordered)
+                            .font(.caption)
+                        }
+                        Text("Reports include connection settings and transfer state, but never passwords or cached file contents.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(12)
+                    .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                    .cornerRadius(8)
+
                     // About
                     VStack(alignment: .leading, spacing: 4) {
                         Text("OpenDuck 1.0.0 (Open-Source)")

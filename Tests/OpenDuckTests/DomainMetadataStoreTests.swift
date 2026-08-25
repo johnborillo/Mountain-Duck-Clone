@@ -63,4 +63,21 @@ final class DomainMetadataStoreTests: XCTestCase {
         let changes = store.changes(domainIdentifier: "domain-a", after: 0)
         XCTAssertTrue(changes.contains { $0.itemIdentifier == item.itemIdentifier && $0.kind == .delete })
     }
+
+    func testConflictLifecyclePersistsAndResolves() {
+        let store = DomainMetadataStore(databaseURL: databaseURL)
+        let conflict = DomainConflict(
+            domainIdentifier: "domain-a",
+            itemIdentifier: "item-a",
+            remotePath: "/notes.txt",
+            localVersion: "local-v1",
+            remoteVersion: "remote-v2"
+        )
+        store.recordConflict(conflict)
+        XCTAssertEqual(store.conflicts(domainIdentifier: "domain-a").count, 1)
+
+        store.resolveConflict(id: conflict.id, resolution: .keepBoth)
+        XCTAssertEqual(store.conflicts(domainIdentifier: "domain-a").count, 0)
+        XCTAssertEqual(store.conflicts(domainIdentifier: "domain-a", includeResolved: true).first?.resolution, .keepBoth)
+    }
 }

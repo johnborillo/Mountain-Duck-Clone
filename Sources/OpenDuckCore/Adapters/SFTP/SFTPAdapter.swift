@@ -135,17 +135,19 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
         }
     }
 
-    private func resolvePath(_ relativeOrAbsPath: String) -> String {
-        if relativeOrAbsPath.hasPrefix("/") {
-            return relativeOrAbsPath
+    private func resolvePath(_ relativeOrAbsPath: String) throws -> String {
+        let candidate = relativeOrAbsPath.hasPrefix("/")
+            ? RemotePath.normalize(relativeOrAbsPath)
+            : RemotePath.join(configuration.rootPath, relativeOrAbsPath)
+        guard RemotePath.isWithin(candidate, root: configuration.rootPath) else {
+            throw AdapterError.invalidPath("Path escapes configured remote root: \(relativeOrAbsPath)")
         }
-        let root = configuration.rootPath.hasSuffix("/") ? configuration.rootPath : configuration.rootPath + "/"
-        return root + relativeOrAbsPath
+        return candidate
     }
 
     public func listDirectory(path: String) async throws -> [RemoteFileEntry] {
         let sftp = try getSFTP()
-        let resolved = resolvePath(path)
+        let resolved = try resolvePath(path)
 
         do {
             let names = try await sftp.listDirectory(atPath: resolved)
@@ -181,7 +183,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
 
     public func stat(path: String) async throws -> RemoteFileEntry {
         let sftp = try getSFTP()
-        let resolved = resolvePath(path)
+        let resolved = try resolvePath(path)
 
         if resolved == "/" || resolved.isEmpty {
             return RemoteFileEntry(name: "/", path: "/", itemType: .directory, size: 0, modificationDate: Date())
@@ -208,7 +210,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
 
     public func upload(from localURL: URL, to remotePath: String, progress: Progress?) async throws {
         let sftp = try getSFTP()
-        let resolved = resolvePath(remotePath)
+        let resolved = try resolvePath(remotePath)
 
         guard FileManager.default.fileExists(atPath: localURL.path) else {
             throw AdapterError.fileNotFound(localURL.path)
@@ -229,7 +231,6 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
         // a durable operation ID and a verified source version.
         try await ensureRemoteDirectoryTree(for: resolved)
         let stagingRemotePath = "\(resolved).openduck_stage_\(UUID().uuidString.lowercased())"
-        let resumeOffset: UInt64 = 0
         let openFlags: SFTPOpenFileFlags = [.write, .create, .truncate]
 
         let stagingFile = try await sftp.openFile(
@@ -237,21 +238,16 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             flags: openFlags
         )
 
-        var offset: UInt64 = resumeOffset
+        var offset: UInt64 = 0
         do {
             let fileHandle = try FileHandle(forReadingFrom: localURL)
             defer { try? fileHandle.close() }
-
-            if resumeOffset > 0 {
-                try fileHandle.seek(toOffset: resumeOffset)
-                progress?.completedUnitCount = Int64(resumeOffset)
-            }
 
             let chunkSize = 64 * 1024 // 64 KB chunk (balanced with Citadel's 32 KB write slices)
             let maxConcurrentChunks = 8 // 512 KB in-flight per file window to prevent socket buffer exhaustion
             try await withThrowingTaskGroup(of: Int.self) { group in
                 var inFlight = 0
-                var totalUploaded: Int64 = Int64(resumeOffset)
+                var totalUploaded: Int64 = 0
 
                 while let chunk = try fileHandle.read(upToCount: chunkSize), !chunk.isEmpty {
                     try Task.checkCancellation()
@@ -292,9 +288,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             // A failed fresh stage has no durable operation record yet, so clean
             // it up. A future operation ledger can retain verified stage IDs for
             // safe resume.
-            if resumeOffset == 0 && (error is CancellationError == false) {
-                try? await sftp.remove(at: stagingRemotePath)
-            }
+            try? await sftp.remove(at: stagingRemotePath)
             throw Self.mapSFTPError(error, context: "uploading to '\(resolved)'")
         }
 
@@ -317,7 +311,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
 
     public func download(remotePath: String, to localURL: URL, progress: Progress?) async throws {
         let sftp = try getSFTP()
-        let resolved = resolvePath(remotePath)
+        let resolved = try resolvePath(remotePath)
 
         let remoteFile = try await sftp.openFile(filePath: resolved, flags: [.read])
 
@@ -407,7 +401,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
 
     public func createDirectory(path: String) async throws {
         let sftp = try getSFTP()
-        let resolved = resolvePath(path)
+        let resolved = try resolvePath(path)
         do {
             try await sftp.createDirectory(atPath: resolved)
         } catch {
@@ -436,7 +430,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
 
     public func delete(remotePath: String) async throws {
         let sftp = try getSFTP()
-        let resolved = resolvePath(remotePath)
+        let resolved = try resolvePath(remotePath)
 
         // Try file unlink first
         do {
@@ -476,8 +470,8 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
 
     public func move(from sourcePath: String, to destinationPath: String) async throws {
         let sftp = try getSFTP()
-        let src = resolvePath(sourcePath)
-        let dst = resolvePath(destinationPath)
+        let src = try resolvePath(sourcePath)
+        let dst = try resolvePath(destinationPath)
         try await sftp.rename(at: src, to: dst)
     }
 

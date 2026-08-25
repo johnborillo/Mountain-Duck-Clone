@@ -41,6 +41,7 @@ public final class CacheEngine: @unchecked Sendable {
     private let maxRetryCount = 10
     private var retryBackoffSeconds: TimeInterval = 5.0
     private var retryAdapterProvider: (@Sendable () async throws -> RemoteFilesystemAdapter)?
+    private var operationCompletionHandler: (@Sendable (JournalEntry) -> Void)?
     /// Serializes journal replay with explicit sync calls so two recovery loops
     /// cannot upload/delete the same operation concurrently.
     private let synchronizationQueue = AsyncTransferQueue(maxConcurrent: 1)
@@ -147,17 +148,33 @@ public final class CacheEngine: @unchecked Sendable {
         }
 
         // Perform download
+        let stagingURL = localURL.appendingPathExtension("openduck-download-\(UUID().uuidString)")
         do {
-            try await adapter.download(remotePath: remotePath, to: localURL, progress: progress)
+            defer { try? FileManager.default.removeItem(at: stagingURL) }
+            let remoteBefore = try await adapter.stat(path: remotePath)
+            try await adapter.download(remotePath: remotePath, to: stagingURL, progress: progress)
+            let remoteAfter = try await adapter.stat(path: remotePath)
+            guard remoteBefore.contentVersion == remoteAfter.contentVersion else {
+                throw AdapterError.conflict(localVersion: remoteBefore.contentVersion, remoteVersion: remoteAfter.contentVersion)
+            }
 
-            let attributes = try FileManager.default.attributesOfItem(atPath: localURL.path)
+            let attributes = try FileManager.default.attributesOfItem(atPath: stagingURL.path)
             let actualSize = (attributes[.size] as? Int64) ?? 0
+            guard actualSize == remoteAfter.size else {
+                throw AdapterError.networkError("Downloaded \(actualSize) bytes for '\(remotePath)', expected \(remoteAfter.size).")
+            }
+            if FileManager.default.fileExists(atPath: localURL.path) {
+                try FileManager.default.removeItem(at: localURL)
+            }
+            try FileManager.default.moveItem(at: stagingURL, to: localURL)
 
             sync {
                 if var entry = index[itemIdentifier] {
                     entry.fileSize = actualSize
                     entry.lastAccessedDate = Date()
                     entry.localModificationDate = (attributes[.modificationDate] as? Date) ?? Date()
+                    entry.remoteModificationDate = remoteAfter.modificationDate
+                    entry.etag = remoteAfter.etag
                     entry.state = .materialized
                     index[itemIdentifier] = entry
                 }
@@ -229,7 +246,7 @@ public final class CacheEngine: @unchecked Sendable {
 
     private func syncPendingWritesLocked(with adapter: RemoteFilesystemAdapter) async throws {
         let pending = journal.pendingEntries()
-        for op in pending {
+        for op in pending where op.retryCount < maxRetryCount {
             try await replay(op, with: adapter)
             if op.action == .upload {
                 sync {
@@ -240,6 +257,7 @@ public final class CacheEngine: @unchecked Sendable {
                     }
                 }
             }
+            notifyOperationCompleted(op)
             journal.remove(id: op.id)
         }
     }
@@ -248,6 +266,18 @@ public final class CacheEngine: @unchecked Sendable {
     /// (for example, a native File Provider create that failed before stat).
     public func enqueue(_ entry: JournalEntry) {
         journal.replacePendingOperation(with: entry)
+    }
+
+    /// Observe successful durable replays so a File Provider extension can
+    /// reconcile metadata immediately instead of waiting for the next periodic
+    /// directory scan. The handler cannot block or fail the remote commit.
+    public func setOperationCompletionHandler(_ handler: (@Sendable (JournalEntry) -> Void)?) {
+        sync { operationCompletionHandler = handler }
+    }
+
+    private func notifyOperationCompleted(_ entry: JournalEntry) {
+        let handler = sync { operationCompletionHandler }
+        handler?(entry)
     }
 
     /// Stage a transient File Provider/Finder source URL into the durable cache
@@ -425,6 +455,7 @@ public final class CacheEngine: @unchecked Sendable {
                         }
                     }
                 }
+                notifyOperationCompleted(op)
                 journal.remove(id: op.id)
             } catch {
                 allSucceeded = false

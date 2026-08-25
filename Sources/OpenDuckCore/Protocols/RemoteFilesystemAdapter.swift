@@ -25,6 +25,17 @@ public struct RemoteFileEntry: Codable, Sendable, Equatable {
         return itemType == .directory
     }
 
+    /// Stable-enough optimistic-concurrency fingerprint available from SFTP stat
+    /// data without downloading the file. Servers that expose an etag win; other
+    /// servers use type, size, and modification time.
+    public var contentVersion: String {
+        etag ?? "\(itemType.rawValue):\(size):\(modificationDate.timeIntervalSince1970)"
+    }
+
+    public var metadataVersion: String {
+        "\(name)|\(itemType.rawValue)|\(size)|\(modificationDate.timeIntervalSince1970)|\(permissions.map { String($0) } ?? "")"
+    }
+
     public init(
         name: String,
         path: String,
@@ -58,6 +69,7 @@ public enum AdapterError: Error, LocalizedError, Sendable {
     case permissionDenied(String)
     case alreadyExists(String)
     case networkError(String)
+    case conflict(localVersion: String, remoteVersion: String)
     case invalidPath(String)
     case unsupportedOperation(String)
     case serverError(String)
@@ -76,6 +88,8 @@ public enum AdapterError: Error, LocalizedError, Sendable {
             return "Remote item already exists: \(path)"
         case .networkError(let msg):
             return "Network connection error: \(msg)"
+        case .conflict(let localVersion, let remoteVersion):
+            return "Remote content changed (local base \(localVersion), remote \(remoteVersion)); the local edit was preserved and not applied."
         case .invalidPath(let path):
             return "Invalid path requested: \(path)"
         case .unsupportedOperation(let op):

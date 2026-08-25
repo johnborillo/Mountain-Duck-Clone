@@ -24,11 +24,14 @@ public final class AppViewModel: ObservableObject {
     @Published public var isMounting: Bool = false
     @Published public var activeTransfers: [TransferProgress] = []
     @Published public var recentTransfers: [TransferProgress] = []
+    @Published public var pendingOperations: [JournalEntry] = []
+    @Published public var conflicts: [DomainConflict] = []
 
     public let connectionManager: ConnectionManager
     public let cacheEngine: CacheEngine
     public let volumeManager: VolumeMountManager
     private var timer: Timer?
+    private var lastRemoteSignal = Date.distantPast
 
     public init(
         connectionManager: ConnectionManager = .shared,
@@ -53,6 +56,7 @@ public final class AppViewModel: ObservableObject {
     public func loadInitialData() {
         loadProfiles()
         refreshCacheStats()
+        refreshOperationalState()
         refreshMountedVolumes()
         refreshRegisteredDomains()
     }
@@ -70,9 +74,7 @@ public final class AppViewModel: ObservableObject {
         currentScreen = .main
         statusMessage = "Profile '\(profile.name)' created."
 
-        Task {
-            await mount(profile: profile)
-        }
+        Task { await registerFinderDomain(for: profile) }
     }
 
     public func deleteProfile(_ id: UUID) {
@@ -238,11 +240,20 @@ public final class AppViewModel: ObservableObject {
     }
 
     public func openInFinder(for profile: ServerProfile) {
-        let volumeURL = URL(fileURLWithPath: "/Volumes/\(profile.name)")
-        if FileManager.default.fileExists(atPath: volumeURL.path) {
-            NSWorkspace.shared.open(volumeURL)
-        } else {
-            Task {
+        Task { @MainActor in
+            if registeredDomainIDs.contains(profile.id) {
+                do {
+                    if let nativeURL = try await FileProviderDomainCoordinator.userVisibleURL(profile: profile) {
+                        NSWorkspace.shared.open(nativeURL)
+                        return
+                    }
+                } catch { /* fall back to the legacy mirror below */ }
+            }
+
+            let volumeURL = URL(fileURLWithPath: "/Volumes/\(profile.name)")
+            if FileManager.default.fileExists(atPath: volumeURL.path) {
+                NSWorkspace.shared.open(volumeURL)
+            } else {
                 await mount(profile: profile)
             }
         }
@@ -250,6 +261,66 @@ public final class AppViewModel: ObservableObject {
 
     public func refreshCacheStats() {
         self.cacheStats = cacheEngine.statistics()
+    }
+
+    public func refreshOperationalState() {
+        var operations = cacheEngine.journal.pendingEntries()
+        for profile in profiles {
+            let domainJournal = UploadJournal(persistenceURL: OpenDuckSharedStorage.uploadJournalURL(forDomain: profile.id.uuidString))
+            operations.append(contentsOf: domainJournal.pendingEntries())
+        }
+        pendingOperations = operations.sorted { $0.timestamp < $1.timestamp }
+        conflicts = profiles.flatMap { DomainMetadataStore.shared.conflicts(domainIdentifier: $0.id.uuidString) }
+    }
+
+    /// Resolve a surfaced native-domain conflict without hiding the underlying
+    /// journal entry. Keeping local leaves the durable upload for the extension's
+    /// retry scheduler; keeping remote removes only operations for this item and
+    /// lets the next working-set refresh hydrate the server copy.
+    public func resolveConflict(_ conflict: DomainConflict, resolution: DomainConflict.Resolution) {
+        let journals = [cacheEngine.journal] + profiles.map {
+            UploadJournal(persistenceURL: OpenDuckSharedStorage.uploadJournalURL(forDomain: $0.id.uuidString))
+        }
+        if resolution == .keepLocal {
+            for journal in journals {
+                journal.unblock(itemIdentifier: conflict.itemIdentifier, remotePath: conflict.remotePath)
+            }
+        } else if resolution == .keepRemote {
+            for journal in journals {
+                for entry in journal.pendingEntries() where entry.itemIdentifier == conflict.itemIdentifier || entry.remotePath == conflict.remotePath {
+                    journal.remove(id: entry.id)
+                }
+            }
+            try? cacheEngine.evict(itemIdentifier: conflict.itemIdentifier)
+        }
+        DomainMetadataStore.shared.resolveConflict(id: conflict.id, resolution: resolution)
+        statusMessage = resolution == .keepLocal
+            ? "✓ Local changes kept; retrying \(conflict.remotePath)."
+            : resolution == .keepRemote
+                ? "✓ Remote version kept for \(conflict.remotePath)."
+                : "✓ Conflict acknowledged for \(conflict.remotePath)."
+        refreshOperationalState()
+        if let profile = profiles.first(where: { $0.id.uuidString == conflict.domainIdentifier }) {
+            Task { try? await FileProviderDomainCoordinator.signalWorkingSet(profile: profile) }
+        }
+    }
+
+    @discardableResult
+    public func exportDiagnostics() -> URL? {
+        do {
+            let url = try DiagnosticsExporter.writeReport(
+                profiles: profiles,
+                cacheStats: cacheStats,
+                pendingOperations: pendingOperations,
+                conflicts: conflicts
+            )
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+            statusMessage = "✓ Diagnostics report created."
+            return url
+        } catch {
+            statusMessage = "❌ Could not create diagnostics report: \(error.localizedDescription)"
+            return nil
+        }
     }
 
     public func purgeCache() {
@@ -285,7 +356,18 @@ public final class AppViewModel: ObservableObject {
             Task { @MainActor [weak self] in
                 self?.refreshCacheStats()
                 self?.refreshMountedVolumes()
+                self?.refreshOperationalState()
+                if Date().timeIntervalSince(self?.lastRemoteSignal ?? .distantPast) > 30 {
+                    self?.lastRemoteSignal = Date()
+                    self?.signalNativeDomains()
+                }
             }
+        }
+    }
+
+    private func signalNativeDomains() {
+        for profile in profiles where registeredDomainIDs.contains(profile.id) {
+            Task { try? await FileProviderDomainCoordinator.signalWorkingSet(profile: profile) }
         }
     }
 

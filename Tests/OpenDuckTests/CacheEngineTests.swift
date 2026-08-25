@@ -65,6 +65,29 @@ final class CacheEngineTests: XCTestCase {
         XCTAssertEqual(remoteContent, modifiedContent)
     }
 
+    func testHydrationRejectsRemoteMutationDuringDownload() async throws {
+        let adapter = MockFileSystemAdapter()
+        try await adapter.connect()
+        adapter.seedFile(path: "/data/race.txt", content: "version one")
+        adapter.onDownload = {
+            adapter.seedFile(path: "/data/race.txt", content: "version two")
+        }
+
+        let engine = CacheEngine(cacheDirectory: tempCacheDir)
+        let itemID = engine.itemIdentifier(for: "/data/race.txt")
+        do {
+            _ = try await engine.getOrHydrate(itemIdentifier: itemID, remotePath: "/data/race.txt", adapter: adapter)
+            XCTFail("Expected a remote version conflict")
+        } catch let error as AdapterError {
+            guard case .conflict = error else {
+                XCTFail("Expected conflict, got \(error)")
+                return
+            }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: engine.fileURL(for: itemID).path))
+        XCTAssertEqual(engine.entry(for: itemID)?.state, .placeholder)
+    }
+
     func testLruEvictionPolicy() {
         let policy = LRUEvictionPolicy(maxCacheSizeBytes: 1000, lowWatermarkPercentage: 0.5)
 
@@ -160,6 +183,26 @@ final class CacheEngineTests: XCTestCase {
         } catch {
             XCTAssertEqual(engine.journal.count, 1)
         }
+    }
+
+    func testBlockedConflictDoesNotReplayUntilExplicitlyUnblocked() async throws {
+        let journalURL = tempCacheDir.appendingPathComponent("journal-conflict.json")
+        let engine = CacheEngine(cacheDirectory: tempCacheDir, journalURL: journalURL)
+        let sourceURL = tempCacheDir.appendingPathComponent("conflict-source.txt")
+        try Data("local version".utf8).write(to: sourceURL)
+        try engine.enqueueUpload(itemIdentifier: "conflict-id", remotePath: "/conflict.txt", sourceURL: sourceURL)
+        engine.journal.block(itemIdentifier: "conflict-id", remotePath: "/conflict.txt")
+
+        let adapter = MockFileSystemAdapter()
+        try await adapter.connect()
+        try await engine.syncPendingWrites(with: adapter)
+        XCTAssertTrue(engine.journal.pendingEntries().contains { $0.itemIdentifier == "conflict-id" })
+        XCTAssertFalse(adapter.uploadedPaths.contains("/conflict.txt"))
+
+        engine.journal.unblock(itemIdentifier: "conflict-id", remotePath: "/conflict.txt")
+        try await engine.syncPendingWrites(with: adapter)
+        XCTAssertEqual(engine.journal.count, 0)
+        XCTAssertTrue(adapter.uploadedPaths.contains("/conflict.txt"))
     }
 
     func testEnqueueUploadStagesTransientSourceDurably() async throws {

@@ -49,6 +49,12 @@ func runAllTests() async throws {
     let fpItemTests = FileProviderItemTests()
     await runTest("FileProviderItemTests.testItemCreationFromEntry") { fpItemTests.testItemCreationFromEntry() }
     await runTest("FileProviderItemTests.testDirectoryItemCapabilities") { fpItemTests.testDirectoryItemCapabilities() }
+    await runTest("FileProviderItemTests.testItemVersionCarriesRemoteFingerprint") { fpItemTests.testItemVersionCarriesRemoteFingerprint() }
+
+    // RemotePathTests
+    let remotePathTests = RemotePathTests()
+    await runTest("RemotePathTests.testNormalizationAndJoining") { remotePathTests.testNormalizationAndJoining() }
+    await runTest("RemotePathTests.testRootConfinementRejectsTraversalAndSiblingPrefix") { remotePathTests.testRootConfinementRejectsTraversalAndSiblingPrefix() }
 
     // DomainMetadataStoreTests
     let domainMetadataTests = DomainMetadataStoreTests()
@@ -56,7 +62,12 @@ func runAllTests() async throws {
     await runTest("DomainMetadataStoreTests.testIdentitySurvivesMetadataRefresh") { domainMetadataTests.testIdentitySurvivesMetadataRefresh() }
     await runTest("DomainMetadataStoreTests.testRenamePreservesIdentityAndEmitsChange") { domainMetadataTests.testRenamePreservesIdentityAndEmitsChange() }
     await runTest("DomainMetadataStoreTests.testDeleteIsARecoverableTombstone") { domainMetadataTests.testDeleteIsARecoverableTombstone() }
+    await runTest("DomainMetadataStoreTests.testConflictLifecyclePersistsAndResolves") { domainMetadataTests.testConflictLifecyclePersistsAndResolves() }
     try domainMetadataTests.tearDownWithError()
+
+    // DiagnosticsExporterTests
+    let diagnosticsTests = DiagnosticsExporterTests()
+    await runTest("DiagnosticsExporterTests.testReportIsReadableAndRedactsSecretLikePaths") { try diagnosticsTests.testReportIsReadableAndRedactsSecretLikePaths() }
 
     // ConnectionManagerTests
     let connTests = ConnectionManagerTests()
@@ -74,10 +85,12 @@ func runAllTests() async throws {
     try cacheTests.setUpWithError()
     await runTest("CacheEngineTests.testPlaceholderRegistration") { cacheTests.testPlaceholderRegistration() }
     await runTest("CacheEngineTests.testHydrationAndDirtySync") { try await cacheTests.testHydrationAndDirtySync() }
+    await runTest("CacheEngineTests.testHydrationRejectsRemoteMutationDuringDownload") { try await cacheTests.testHydrationRejectsRemoteMutationDuringDownload() }
     await runTest("CacheEngineTests.testLruEvictionPolicy") { cacheTests.testLruEvictionPolicy() }
     await runTest("CacheEngineTests.testPurgeUnpinnedProtectsDirtyAndPinnedFiles") { try await cacheTests.testPurgeUnpinnedProtectsDirtyAndPinnedFiles() }
     await runTest("CacheEngineTests.testLatestPendingUploadIsPersistedAndSupersedesOlderSave") { try cacheTests.testLatestPendingUploadIsPersistedAndSupersedesOlderSave() }
     await runTest("CacheEngineTests.testMissingQueuedUploadIsRetainedForRecovery") { try await cacheTests.testMissingQueuedUploadIsRetainedForRecovery() }
+    await runTest("CacheEngineTests.testBlockedConflictDoesNotReplayUntilExplicitlyUnblocked") { try await cacheTests.testBlockedConflictDoesNotReplayUntilExplicitlyUnblocked() }
     await runTest("CacheEngineTests.testEnqueueUploadStagesTransientSourceDurably") { try await cacheTests.testEnqueueUploadStagesTransientSourceDurably() }
     await runTest("CacheEngineTests.testReplayedDeleteMissingRemoteIsIdempotent") { try await cacheTests.testReplayedDeleteMissingRemoteIsIdempotent() }
     await runTest("CacheEngineTests.testReplayedMoveAfterRemoteSuccessIsIdempotent") { try await cacheTests.testReplayedMoveAfterRemoteSuccessIsIdempotent() }
