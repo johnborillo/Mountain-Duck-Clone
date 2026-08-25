@@ -88,6 +88,16 @@ func runAllTests() async throws {
     await runTest("AdversarialPathsTests.testSelfInitiatedRemovalTokenLifecycle") { advTests.testSelfInitiatedRemovalTokenLifecycle() }
     try advTests.tearDownWithError()
 
+    // MoveRenameTests
+    let renameTests = MoveRenameTests()
+    try renameTests.setUpWithError()
+    await runTest("MoveRenameTests.testFileMoveIssuesSingleRemoteMoveNotCopyDelete") { try await renameTests.testFileMoveIssuesSingleRemoteMoveNotCopyDelete() }
+    await runTest("MoveRenameTests.testDirectoryMoveRekeysAllDescendants") { try await renameTests.testDirectoryMoveRekeysAllDescendants() }
+    await runTest("MoveRenameTests.testUnmatchedDepartureDoesNotDeleteRemote") { try await renameTests.testUnmatchedDepartureDoesNotDeleteRemote() }
+    await runTest("MoveRenameTests.testSiblingWithLikeMetacharactersSurvivesRekey") { try await renameTests.testSiblingWithLikeMetacharactersSurvivesRekey() }
+    await runTest("MoveRenameTests.testRenameThenDeleteInSameBatchDeletes") { try await renameTests.testRenameThenDeleteInSameBatchDeletes() }
+    try renameTests.tearDownWithError()
+
     print("\n🎉 [All Tests Passed] Successfully verified \(passed) tests across all test suites!")
 }
 

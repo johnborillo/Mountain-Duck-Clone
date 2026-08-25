@@ -516,6 +516,20 @@ public final class WatcherContext: @unchecked Sendable {
     private let transferQueue = AsyncTransferQueue(maxConcurrent: 4)
     private let lock = NSLock()
 
+    /// A path that disappeared via ItemRenamed, awaiting a matching arrival.
+    private struct PendingDeparture {
+        let localPath: String
+        let remotePath: String
+        let isDir: Bool
+        let size: Int64          // -1 for directories (can't stat a departed dir)
+        let mtime: Date?         // nil for directories
+        let at: Date
+    }
+    private var pendingDepartures: [PendingDeparture] = []
+    private var pendingArrivalWork: [String: DispatchWorkItem] = [:]
+    /// How long to wait for the other half of a rename pair.
+    private let renameCorrelationWindow: TimeInterval = 2.0
+
     public func invalidate() {
         lock.lock()
         isStopped = true
@@ -523,6 +537,11 @@ public final class WatcherContext: @unchecked Sendable {
             item.cancel()
         }
         syncDebounceWorkItems.removeAll()
+        for (_, item) in pendingArrivalWork {
+            item.cancel()
+        }
+        pendingArrivalWork.removeAll()
+        pendingDepartures.removeAll()
         for (_, task) in activeUploadTasks {
             task.cancel()
         }
@@ -619,6 +638,167 @@ public final class WatcherContext: @unchecked Sendable {
         return true
     }
 
+    // MARK: - Rename & Move Correlation
+
+    public func handleRenameEvent(
+        localPath: String,
+        remotePath: String,
+        isDir: Bool,
+        exists: Bool
+    ) {
+        if isReadOnly { return }
+        if lock.withLock({ isStopped }) { return }
+        // Our own moves (staging renames, eviction) must never round-trip.
+        if manager.isSelfInitiatedRemoval(path: localPath) { return }
+        if !exists {
+            recordDeparture(localPath: localPath, remotePath: remotePath, isDir: isDir)
+        } else {
+            handleArrival(localPath: localPath, remotePath: remotePath, isDir: isDir)
+        }
+    }
+
+    private func recordDeparture(localPath: String, remotePath: String, isDir: Bool) {
+        // Capture identity from the DB — the file is already gone from disk, so the
+        // record is the only place its size and mtime still exist.
+        let record = MetadataDatabase.shared.record(forLocalPath: localPath)
+        let departure = PendingDeparture(
+            localPath: localPath,
+            remotePath: remotePath,
+            isDir: isDir,
+            size: isDir ? -1 : (record?.size ?? -1),
+            mtime: isDir ? nil : record?.localMtime,
+            at: Date()
+        )
+        lock.withLock { pendingDepartures.append(departure) }
+        // Timeout: an unmatched departure is NOT treated as a delete.
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let stillPending: Bool = self.lock.withLock {
+                guard let idx = self.pendingDepartures.firstIndex(where: { $0.localPath == localPath }) else {
+                    return false
+                }
+                self.pendingDepartures.remove(at: idx)
+                self.pendingArrivalWork.removeValue(forKey: localPath)
+                return true
+            }
+            guard stillPending else { return }
+            // Deliberate policy: a move out of the watched tree, or a rename we failed to
+            // pair, leaves a stale remote copy rather than risking a wrong delete. Stale
+            // data is recoverable; a wrongly inferred delete is not.
+            MetadataDatabase.shared.recordDivergenceEvent(
+                volumeName: self.volumeURL.lastPathComponent,
+                path: remotePath,
+                reason: "Unmatched rename departure — remote copy left in place for manual review."
+            )
+            self.onStatusChange?("⚠️ Moved out of view: \((localPath as NSString).lastPathComponent) — remote copy kept.")
+        }
+        lock.withLock { pendingArrivalWork[localPath] = work }
+        DispatchQueue.global(qos: .utility).asyncAfter(
+            deadline: .now() + renameCorrelationWindow,
+            execute: work
+        )
+    }
+
+    private func handleArrival(localPath: String, remotePath: String, isDir: Bool) {
+        let matched: PendingDeparture? = lock.withLock {
+            guard let idx = matchIndex(for: localPath, isDir: isDir) else { return nil }
+            let dep = pendingDepartures.remove(at: idx)
+            pendingArrivalWork.removeValue(forKey: dep.localPath)?.cancel()
+            return dep
+        }
+        guard let departure = matched else {
+            // No pair — a genuine arrival from outside the volume. Let the normal
+            // create/upload path own it.
+            handleEvent(localPath: localPath, flags: UInt32(kFSEventStreamEventFlagItemCreated)
+                                                  | (isDir ? UInt32(kFSEventStreamEventFlagItemIsDir) : 0))
+            return
+        }
+        performRemoteMove(from: departure, toLocal: localPath, toRemote: remotePath, isDir: isDir)
+    }
+
+    /// Pair an arrival with a departure.
+    ///
+    /// Files match on (size, mtime) from the DB record — reliable in practice, since a move
+    /// preserves both. Directories can't be stat'd after departure, so they match on basename
+    /// alone within the window. That's the strongest signal the API makes available.
+    private func matchIndex(for localPath: String, isDir: Bool) -> Int? {
+        let name = (localPath as NSString).lastPathComponent
+        let now = Date()
+        let candidates = pendingDepartures.enumerated().filter { _, dep in
+            dep.isDir == isDir
+                && now.timeIntervalSince(dep.at) < renameCorrelationWindow
+        }
+        if isDir {
+            return candidates.first { _, dep in
+                (dep.localPath as NSString).lastPathComponent == name
+            }?.offset
+        }
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: localPath),
+              let size = attrs[.size] as? Int64 else {
+            // Can't stat the arrival; fall back to basename.
+            return candidates.first { _, dep in
+                (dep.localPath as NSString).lastPathComponent == name
+            }?.offset
+        }
+        // Prefer exact (size, mtime); accept size + basename; then basename alone.
+        let mtime = attrs[.modificationDate] as? Date
+        if let m = mtime,
+           let hit = candidates.first(where: { _, dep in
+               dep.size == size && dep.mtime.map { abs($0.timeIntervalSince(m)) < 2.0 } == true
+           }) {
+            return hit.offset
+        }
+        if let hit = candidates.first(where: { _, dep in
+            dep.size == size && (dep.localPath as NSString).lastPathComponent == name
+        }) {
+            return hit.offset
+        }
+        return candidates.first { _, dep in
+            (dep.localPath as NSString).lastPathComponent == name
+        }?.offset
+    }
+
+    private func performRemoteMove(
+        from departure: PendingDeparture,
+        toLocal newLocalPath: String,
+        toRemote newRemotePath: String,
+        isDir: Bool
+    ) {
+        let oldRemote = departure.remotePath
+        let oldLocal = departure.localPath
+        Task {
+            do {
+                try await self.adapter.move(from: oldRemote, to: newRemotePath)
+                // Rekey the DB for the item and, if a directory, every descendant.
+                // Without this the whole moved subtree keeps stale local/remote paths
+                // and becomes invisible to the uploader.
+                MetadataDatabase.shared.rekeyPathPrefix(
+                    oldLocalPrefix: oldLocal,
+                    newLocalPrefix: newLocalPath,
+                    oldRemotePrefix: oldRemote,
+                    newRemotePrefix: newRemotePath
+                )
+                // Both parents' cached listings are now wrong.
+                self.manager.invalidateDirectory(remotePath: (oldRemote as NSString).deletingLastPathComponent)
+                self.manager.invalidateDirectory(remotePath: (newRemotePath as NSString).deletingLastPathComponent)
+                if isDir {
+                    self.manager.invalidateDirectory(remotePath: oldRemote)
+                    self.manager.markPopulated(remotePath: newRemotePath)
+                }
+                self.onStatusChange?("✓ Moved \((newLocalPath as NSString).lastPathComponent) on server")
+            } catch {
+                // Server-side move failed. Do NOT fall back to copy-then-delete —
+                // that's the duplication behaviour this whole change exists to fix.
+                MetadataDatabase.shared.recordDivergenceEvent(
+                    volumeName: self.volumeURL.lastPathComponent,
+                    path: newRemotePath,
+                    reason: "Remote move \(oldRemote) → \(newRemotePath) failed: \(error). Local and remote now differ."
+                )
+                self.onStatusChange?("❌ Move failed on server: \((newLocalPath as NSString).lastPathComponent) — see divergence log")
+            }
+        }
+    }
+
     public func handleEvent(localPath: String, flags: UInt32) {
         let stopped: Bool = lock.withLock { isStopped }
         guard !stopped else { return }
@@ -661,10 +841,24 @@ public final class WatcherContext: @unchecked Sendable {
             remotePath = remoteRootPath + relativePath
         }
 
-        let isDir = (flags & UInt32(kFSEventStreamEventFlagItemIsDir)) != 0
-        let isRemoved = (flags & UInt32(kFSEventStreamEventFlagItemRemoved)) != 0
-        let localURL = URL(fileURLWithPath: localPath)
+        let isDir     = (flags & UInt32(kFSEventStreamEventFlagItemIsDir))    != 0
+        let isRemoved = (flags & UInt32(kFSEventStreamEventFlagItemRemoved))  != 0
+        let isRenamed = (flags & UInt32(kFSEventStreamEventFlagItemRenamed))  != 0
+        let localURL  = URL(fileURLWithPath: localPath)
         let fileExists = FileManager.default.fileExists(atPath: localPath)
+
+        // Renames are their own thing: FSEvents fires ItemRenamed twice (old path, new path)
+        // with no correlation ID and neither carrying ItemRemoved. Must be handled before the
+        // isDir / isRemoved branches, which would otherwise silently drop the departure half.
+        if isRenamed && !isRemoved {
+            handleRenameEvent(
+                localPath: localPath,
+                remotePath: remotePath,
+                isDir: isDir,
+                exists: fileExists
+            )
+            return
+        }
 
         // Case 1: Directory Access / Creation / Deletion
         if isDir {
@@ -680,6 +874,11 @@ public final class WatcherContext: @unchecked Sendable {
 
                     Task {
                         defer { self.lock.withLock { _ = self.pendingPaths.remove(remotePath) } }
+                        guard (try? await self.adapter.stat(path: remotePath)) != nil else {
+                            // Local-only directory (freshly created, or the arrival half of a move
+                            // still awaiting correlation). Nothing to enumerate.
+                            return
+                        }
                         _ = try? await self.manager.populateDirectory(
                             adapter: self.adapter,
                             remotePath: remotePath,

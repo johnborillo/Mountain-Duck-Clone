@@ -344,6 +344,115 @@ public final class MetadataDatabase: @unchecked Sendable {
         sqlite3_finalize(stmt)
     }
 
+    // MARK: - Subtree Move / Rekey
+
+    /// Rewrite the local and remote path prefixes for an entire subtree after a move.
+    ///
+    /// Both prefixes are rewritten together because a move changes both. Destination-range
+    /// rows are deleted first to avoid violating the UNIQUE constraint on local_path if a
+    /// stale record already sits at a destination path.
+    ///
+    /// - Returns: number of records rekeyed.
+    @discardableResult
+    public func rekeyPathPrefix(
+        oldLocalPrefix: String,
+        newLocalPrefix: String,
+        oldRemotePrefix: String,
+        newRemotePrefix: String
+    ) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+
+        // Match the directory itself and everything beneath it, but not sibling paths
+        // that merely share a string prefix (e.g. /a/photos vs /a/photos-old).
+        let selfPattern = oldLocalPrefix
+        let childPattern = oldLocalPrefix.hasSuffix("/")
+            ? oldLocalPrefix + "%"
+            : oldLocalPrefix + "/%"
+
+        sqlite3_exec(db, "BEGIN IMMEDIATE;", nil, nil, nil)
+
+        // 1. Clear any stale rows already occupying the destination range.
+        let clearSQL = """
+            DELETE FROM file_records
+            WHERE local_path = ? OR local_path LIKE ? ESCAPE '\\';
+            """
+        let newSelf = newLocalPrefix
+        let newChild = newLocalPrefix.hasSuffix("/")
+            ? newLocalPrefix + "%"
+            : newLocalPrefix + "/%"
+        var clearStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, clearSQL, -1, &clearStmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(clearStmt, 1, (newSelf as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(clearStmt, 2, (escapeLike(newChild) as NSString).utf8String, -1, nil)
+            _ = sqlite3_step(clearStmt)
+        }
+        sqlite3_finalize(clearStmt)
+
+        // 2. Rewrite both prefixes for the subtree.
+        //    substr(local_path, N+1) takes everything after the old prefix.
+        let updateSQL = """
+            UPDATE file_records
+            SET local_path  = ? || substr(local_path,  ?),
+                remote_path = ? || substr(remote_path, ?),
+                file_name   = CASE
+                                  WHEN local_path = ? THEN ?
+                                  ELSE file_name
+                              END
+            WHERE local_path = ? OR local_path LIKE ? ESCAPE '\\';
+            """
+        var stmt: OpaquePointer?
+        var changed = 0
+        if sqlite3_prepare_v2(db, updateSQL, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(stmt, 1, (newLocalPrefix as NSString).utf8String, -1, nil)
+            sqlite3_bind_int(stmt, 2, Int32(oldLocalPrefix.utf8.count + 1))
+            sqlite3_bind_text(stmt, 3, (newRemotePrefix as NSString).utf8String, -1, nil)
+            sqlite3_bind_int(stmt, 4, Int32(oldRemotePrefix.utf8.count + 1))
+            sqlite3_bind_text(stmt, 5, (selfPattern as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 6, ((newLocalPrefix as NSString).lastPathComponent as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 7, (selfPattern as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 8, (escapeLike(childPattern) as NSString).utf8String, -1, nil)
+            if sqlite3_step(stmt) == SQLITE_DONE {
+                changed = Int(sqlite3_changes(db))
+            }
+        }
+        sqlite3_finalize(stmt)
+        sqlite3_exec(db, "COMMIT;", nil, nil, nil)
+        return changed
+    }
+
+    /// Escape LIKE metacharacters so real filenames containing % or _ don't over-match.
+    /// Pairs with `ESCAPE '\'` in the SQL above.
+    private func escapeLike(_ pattern: String) -> String {
+        // Only escape within the literal portion; the trailing wildcard is ours.
+        guard pattern.hasSuffix("%") else { return pattern }
+        let literal = String(pattern.dropLast())
+        let escaped = literal
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%",  with: "\\%")
+            .replacingOccurrences(of: "_",  with: "\\_")
+        return escaped + "%"
+    }
+
+    /// All records whose local_path sits at or beneath a prefix.
+    public func records(underLocalPrefix prefix: String) -> [FileRecord] {
+        let childPattern = prefix.hasSuffix("/") ? prefix + "%" : prefix + "/%"
+        let sql = "SELECT id, volume_name, remote_path, local_path, file_name, size, is_placeholder, state, etag, remote_mtime, local_mtime, last_synced, is_pinned FROM file_records WHERE local_path = ? OR local_path LIKE ? ESCAPE '\\';"
+        lock.lock()
+        defer { lock.unlock() }
+        var out: [FileRecord] = []
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(stmt, 1, (prefix as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 2, (escapeLike(childPattern) as NSString).utf8String, -1, nil)
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let rec = parseRecord(from: stmt) { out.append(rec) }
+            }
+        }
+        sqlite3_finalize(stmt)
+        return out
+    }
+
     public func allPlaceholders(forVolume volumeName: String) -> Set<String> {
         let sql = "SELECT local_path FROM file_records WHERE volume_name = ? AND is_placeholder = 1;"
 
