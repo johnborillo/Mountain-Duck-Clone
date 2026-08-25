@@ -12,9 +12,9 @@ public final class ConnectionManager: @unchecked Sendable {
     public let keychain: KeychainHelper
     private let userDefaults: UserDefaults
 
-    public init(keychain: KeychainHelper = .shared, userDefaults: UserDefaults = .standard) {
+    public init(keychain: KeychainHelper = .shared, userDefaults: UserDefaults? = nil) {
         self.keychain = keychain
-        self.userDefaults = userDefaults
+        self.userDefaults = userDefaults ?? OpenDuckSharedStorage.userDefaults
         loadPersistedProfiles()
     }
 

@@ -41,7 +41,7 @@ public struct ServerProfile: Codable, Sendable, Identifiable, Equatable {
         privateKeyPath: String? = nil,
         remoteRootPath: String = "/",
         autoConnect: Bool = false,
-        isReadOnly: Bool = false,
+        isReadOnly: Bool = true,
         createdAt: Date = Date(),
         lastConnectedAt: Date? = nil
     ) {

@@ -60,6 +60,23 @@ public final class UploadJournal: @unchecked Sendable {
         entries[entry.id] = entry
     }
 
+    /// Records the latest pending upload for an item, replacing older upload
+    /// intents. A burst of editor save events must never produce a replay queue
+    /// that later uploads stale content over the newest version.
+    public func replacePendingUpload(with entry: JournalEntry) {
+        precondition(entry.action == .upload)
+        lock.lock()
+        defer {
+            saveToDisk()
+            lock.unlock()
+        }
+        entries = entries.filter { _, existing in
+            !(existing.action == .upload &&
+              (existing.itemIdentifier == entry.itemIdentifier || existing.remotePath == entry.remotePath))
+        }
+        entries[entry.id] = entry
+    }
+
     public func remove(id: UUID) {
         lock.lock()
         defer {

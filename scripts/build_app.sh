@@ -98,7 +98,7 @@ PLIST
 # 4. Sign the bundles
 echo "🔏 Code-signing bundles..."
 codesign --force --sign - --entitlements "$PROJECT_ROOT/scripts/Extension.entitlements" "$APPEX_BUNDLE"
-codesign --force --sign - "$APP_BUNDLE"
+codesign --force --sign - --entitlements "$PROJECT_ROOT/scripts/App.entitlements" "$APP_BUNDLE"
 
 # 5. Install to /Applications for system-wide registration
 echo "📂 Installing to /Applications/OpenDuck.app..."

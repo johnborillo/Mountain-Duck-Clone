@@ -175,7 +175,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             }
             return entries
         } catch {
-            throw AdapterError.fileNotFound(path)
+            throw Self.mapSFTPError(error, context: "listing '\(resolved)'")
         }
     }
 
@@ -202,7 +202,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
                 modificationDate: modDate
             )
         } catch {
-            throw AdapterError.fileNotFound(path)
+            throw Self.mapSFTPError(error, context: "reading attributes for '\(resolved)'")
         }
     }
 
@@ -217,29 +217,20 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
         let localAttrs = try? FileManager.default.attributesOfItem(atPath: localURL.path)
         let localSize = (localAttrs?[.size] as? Int64) ?? 0
 
-        // SAFEGUARD: Refuse 0-byte overwrite over non-empty remote file
-        if localSize == 0 {
-            if let remoteStat = try? await stat(path: resolved), remoteStat.size > 0 {
-                throw AdapterError.invalidPath("SAFETY SHIELD BLOCKED: Refusing to overwrite remote file '\(resolved)' (\(remoteStat.size) bytes) with local 0-byte file.")
-            }
-        }
+        // Placeholder protection belongs at the Finder integration boundary.
+        // A generic transport layer must permit intentional truncation of an
+        // existing remote file to zero bytes once a real mutation is approved.
 
         progress?.totalUnitCount = localSize
         progress?.completedUnitCount = 0
 
-        // Deterministic Staging Path for Resume Support
-        let hash = Insecure.MD5.hash(data: Data(resolved.utf8)).map { String(format: "%02x", $0) }.joined()
-        let stagingRemotePath = "\(resolved).openduck_stage_\(hash.prefix(12))"
-
-        // Check if a partial staging file exists for offset-based resumption
-        var resumeOffset: UInt64 = 0
-        var openFlags: SFTPOpenFileFlags = [.write, .create, .truncate]
-
-        if localSize > 0, let existingAttrs = try? await sftp.getAttributes(at: stagingRemotePath),
-           let existingSize = existingAttrs.size, existingSize > 0, existingSize < UInt64(localSize) {
-            resumeOffset = existingSize
-            openFlags = [.write, .create] // Open without truncate to resume
-        }
+        // A unique staging name prevents two overlapping saves from sharing a
+        // partial file. Resume is deliberately deferred until it can be tied to
+        // a durable operation ID and a verified source version.
+        try await ensureRemoteDirectoryTree(for: resolved)
+        let stagingRemotePath = "\(resolved).openduck_stage_\(UUID().uuidString.lowercased())"
+        let resumeOffset: UInt64 = 0
+        let openFlags: SFTPOpenFileFlags = [.write, .create, .truncate]
 
         let stagingFile = try await sftp.openFile(
             filePath: stagingRemotePath,
@@ -298,26 +289,27 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             try await stagingFile.close()
         } catch {
             try? await stagingFile.close()
-            // On cancellation or network error, retain staging file if partial bytes were uploaded for resumption.
-            // On fatal non-cancellation errors with 0 bytes, cleanup.
+            // A failed fresh stage has no durable operation record yet, so clean
+            // it up. A future operation ledger can retain verified stage IDs for
+            // safe resume.
             if resumeOffset == 0 && (error is CancellationError == false) {
                 try? await sftp.remove(at: stagingRemotePath)
             }
             throw Self.mapSFTPError(error, context: "uploading to '\(resolved)'")
         }
 
-        // Atomic Rename staging -> final destination (with overwrite fallback)
+        // Atomic rename-overwrite is supported by most modern SFTP servers. If
+        // a server rejects that operation, retain the staged data and report a
+        // recoverable failure. Unlinking the destination first would turn an
+        // interrupted replacement into irreversible remote data loss.
         do {
             try await sftp.rename(at: stagingRemotePath, to: resolved)
         } catch {
-            // SFTP v3 standard rename fails if destination already exists; unlink destination and retry
-            try? await sftp.remove(at: resolved)
-            do {
-                try await sftp.rename(at: stagingRemotePath, to: resolved)
-            } catch {
-                // Last resort: staging file is intact on server for future resume
-                throw AdapterError.serverError("Upload completed but rename from staging path failed: \(error.localizedDescription)")
-            }
+            throw AdapterError.serverError(
+                "Upload staged successfully but the server rejected an atomic replacement of '\(resolved)'. "
+                + "The existing remote file was preserved; staged data remains for recovery. "
+                + "Server error: \(error.localizedDescription)"
+            )
         }
 
         progress?.completedUnitCount = localSize
@@ -348,6 +340,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
         let chunkSize = 256 * 1024 // 256 KB chunk
         let maxConcurrentChunks = 32 // 8 MB in-flight window
         let totalBytesToRead = UInt64(totalSize)
+        var bytesWritten: Int64 = 0
 
         do {
             if totalBytesToRead > 0 {
@@ -377,6 +370,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
                                 try writeHandle.seek(toOffset: offset)
                                 try writeHandle.write(contentsOf: buffer.readableBytesView)
                                 totalDownloaded += Int64(buffer.readableBytes)
+                                bytesWritten = totalDownloaded
                                 progress?.completedUnitCount = totalDownloaded
                             }
                         }
@@ -386,9 +380,15 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
                         try writeHandle.seek(toOffset: offset)
                         try writeHandle.write(contentsOf: buffer.readableBytesView)
                         totalDownloaded += Int64(buffer.readableBytes)
+                        bytesWritten = totalDownloaded
                         progress?.completedUnitCount = totalDownloaded
                     }
                 }
+            }
+            guard bytesWritten == totalSize else {
+                throw AdapterError.networkError(
+                    "Downloaded \(bytesWritten) bytes for '\(resolved)', expected \(totalSize)."
+                )
             }
             try writeHandle.close()
             try await remoteFile.close()
@@ -396,7 +396,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             try? writeHandle.close()
             try? await remoteFile.close()
             try? FileManager.default.removeItem(at: tempURL)
-            throw error
+            throw Self.mapSFTPError(error, context: "downloading '\(resolved)'")
         }
 
         _ = try? FileManager.default.removeItem(at: localURL)
@@ -408,7 +408,11 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
     public func createDirectory(path: String) async throws {
         let sftp = try getSFTP()
         let resolved = resolvePath(path)
-        try await sftp.createDirectory(atPath: resolved)
+        do {
+            try await sftp.createDirectory(atPath: resolved)
+        } catch {
+            throw Self.mapSFTPError(error, context: "creating directory '\(resolved)'")
+        }
     }
 
     /// Recursively ensures that all parent directory components for a given remote file path exist on the remote server.

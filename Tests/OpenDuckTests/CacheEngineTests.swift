@@ -125,4 +125,40 @@ final class CacheEngineTests: XCTestCase {
         let preservedDirtyContent = try String(contentsOf: dirtyURL, encoding: .utf8)
         XCTAssertEqual(preservedDirtyContent, unuploadedEdit)
     }
+
+    func testLatestPendingUploadIsPersistedAndSupersedesOlderSave() throws {
+        let journalURL = tempCacheDir.appendingPathComponent("journal.json")
+        let engine = CacheEngine(cacheDirectory: tempCacheDir, journalURL: journalURL)
+        let entry = RemoteFileEntry(name: "draft.txt", path: "/draft.txt", size: 4)
+        let itemID = engine.registerPlaceholder(for: entry).itemIdentifier
+        let localURL = engine.fileURL(for: itemID)
+        FileManager.default.createFile(atPath: localURL.path, contents: Data("one".utf8))
+
+        engine.markDirty(itemIdentifier: itemID, newLocalURL: localURL)
+        try Data("two".utf8).write(to: localURL)
+        engine.markDirty(itemIdentifier: itemID, newLocalURL: localURL)
+
+        let restored = UploadJournal(persistenceURL: journalURL)
+        let uploads = restored.pendingEntries().filter { $0.action == .upload }
+        XCTAssertEqual(uploads.count, 1)
+        XCTAssertEqual(uploads.first?.remotePath, "/draft.txt")
+    }
+
+    func testMissingQueuedUploadIsRetainedForRecovery() async throws {
+        let journalURL = tempCacheDir.appendingPathComponent("journal.json")
+        let engine = CacheEngine(cacheDirectory: tempCacheDir, journalURL: journalURL)
+        let entry = RemoteFileEntry(name: "draft.txt", path: "/draft.txt", size: 4)
+        let itemID = engine.registerPlaceholder(for: entry).itemIdentifier
+        let missingURL = tempCacheDir.appendingPathComponent("missing-content")
+        engine.markDirty(itemIdentifier: itemID, newLocalURL: missingURL)
+
+        let adapter = MockFileSystemAdapter()
+        try await adapter.connect()
+        do {
+            try await engine.syncPendingWrites(with: adapter)
+            XCTFail("Expected missing content to stop recovery")
+        } catch {
+            XCTAssertEqual(engine.journal.count, 1)
+        }
+    }
 }

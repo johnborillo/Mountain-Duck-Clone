@@ -17,7 +17,7 @@ public struct AddEditConnectionSheet: View {
     @State private var privateKeyPath: String = ""
     @State private var remoteRootPath: String = "/"
     @State private var autoConnect: Bool = false
-    @State private var isReadOnly: Bool = false
+    @State private var isReadOnly: Bool = true
 
     public init(viewModel: AppViewModel) {
         self.viewModel = viewModel
@@ -66,7 +66,7 @@ public struct AddEditConnectionSheet: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("PROTOCOL").font(.caption).bold().foregroundColor(.secondary)
                         Picker("", selection: $protocolType) {
-                            ForEach(RemoteProtocol.allCases, id: \.self) { proto in
+                            ForEach([RemoteProtocol.sftp, .mock], id: \.self) { proto in
                                 Text(proto.rawValue).tag(proto)
                             }
                         }
@@ -188,7 +188,7 @@ public struct AddEditConnectionSheet: View {
                         .font(.subheadline)
                         .padding(.horizontal, 4)
 
-                    Toggle("Read-Only / Safe Preview Mode (Protects Remote Data)", isOn: $isReadOnly)
+                    Toggle("Read-Only / Safe Preview Mode (recommended)", isOn: $isReadOnly)
                         .font(.subheadline)
                         .padding(.horizontal, 4)
                 }

@@ -68,6 +68,8 @@ func runAllTests() async throws {
     await runTest("CacheEngineTests.testHydrationAndDirtySync") { try await cacheTests.testHydrationAndDirtySync() }
     await runTest("CacheEngineTests.testLruEvictionPolicy") { cacheTests.testLruEvictionPolicy() }
     await runTest("CacheEngineTests.testPurgeUnpinnedProtectsDirtyAndPinnedFiles") { try await cacheTests.testPurgeUnpinnedProtectsDirtyAndPinnedFiles() }
+    await runTest("CacheEngineTests.testLatestPendingUploadIsPersistedAndSupersedesOlderSave") { try cacheTests.testLatestPendingUploadIsPersistedAndSupersedesOlderSave() }
+    await runTest("CacheEngineTests.testMissingQueuedUploadIsRetainedForRecovery") { try await cacheTests.testMissingQueuedUploadIsRetainedForRecovery() }
     try cacheTests.tearDownWithError()
 
     // DeleteSyncTests
@@ -76,6 +78,7 @@ func runAllTests() async throws {
     await runTest("DeleteSyncTests.testFailedDeleteIsJournaledForRetry") { try await deleteTests.testFailedDeleteIsJournaledForRetry() }
     await runTest("DeleteSyncTests.testCircuitBreakerBlockedDeletesAreJournaled") { try await deleteTests.testCircuitBreakerBlockedDeletesAreJournaled() }
     await runTest("DeleteSyncTests.testHydratingPathTokenPreventsReupload") { deleteTests.testHydratingPathTokenPreventsReupload() }
+    await runTest("DeleteSyncTests.testLocalDirectoryCreationCreatesRemoteDirectory") { try await deleteTests.testLocalDirectoryCreationCreatesRemoteDirectory() }
     await runTest("DeleteSyncTests.testProvenanceTokenPersistsInDatabase") { deleteTests.testProvenanceTokenPersistsInDatabase() }
     await runTest("DeleteSyncTests.testMockAdapterRecursiveDirectoryDelete") { try await deleteTests.testMockAdapterRecursiveDirectoryDelete() }
     await runTest("DeleteSyncTests.testRetrySchedulerProcessesPendingDeletes") { try await deleteTests.testRetrySchedulerProcessesPendingDeletes() }

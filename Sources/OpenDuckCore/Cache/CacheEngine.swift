@@ -183,7 +183,7 @@ public final class CacheEngine: @unchecked Sendable {
 
             index[itemIdentifier] = entry
 
-            journal.append(JournalEntry(
+            journal.replacePendingUpload(with: JournalEntry(
                 action: .upload,
                 itemIdentifier: itemIdentifier,
                 localFileURL: targetURL,
@@ -212,14 +212,16 @@ public final class CacheEngine: @unchecked Sendable {
         for op in pending {
             switch op.action {
             case .upload:
-                if let localURL = op.localFileURL, FileManager.default.fileExists(atPath: localURL.path) {
-                    try await adapter.upload(from: localURL, to: op.remotePath, progress: nil)
-                    sync {
-                        if var entry = index[op.itemIdentifier] {
-                            entry.state = .materialized
-                            entry.remoteModificationDate = Date()
-                            index[op.itemIdentifier] = entry
-                        }
+                guard let localURL = op.localFileURL,
+                      FileManager.default.fileExists(atPath: localURL.path) else {
+                    throw AdapterError.invalidPath("Queued upload content is unavailable for \(op.remotePath). The operation was retained for recovery.")
+                }
+                try await adapter.upload(from: localURL, to: op.remotePath, progress: nil)
+                sync {
+                    if var entry = index[op.itemIdentifier] {
+                        entry.state = .materialized
+                        entry.remoteModificationDate = Date()
+                        index[op.itemIdentifier] = entry
                     }
                 }
             case .createDirectory:
@@ -294,14 +296,16 @@ public final class CacheEngine: @unchecked Sendable {
             do {
                 switch op.action {
                 case .upload:
-                    if let localURL = op.localFileURL, FileManager.default.fileExists(atPath: localURL.path) {
-                        try await adapter.upload(from: localURL, to: op.remotePath, progress: nil)
-                        sync {
-                            if var entry = index[op.itemIdentifier] {
-                                entry.state = .materialized
-                                entry.remoteModificationDate = Date()
-                                index[op.itemIdentifier] = entry
-                            }
+                    guard let localURL = op.localFileURL,
+                          FileManager.default.fileExists(atPath: localURL.path) else {
+                        throw AdapterError.invalidPath("Queued upload content is unavailable for \(op.remotePath).")
+                    }
+                    try await adapter.upload(from: localURL, to: op.remotePath, progress: nil)
+                    sync {
+                        if var entry = index[op.itemIdentifier] {
+                            entry.state = .materialized
+                            entry.remoteModificationDate = Date()
+                            index[op.itemIdentifier] = entry
                         }
                     }
                 case .createDirectory:

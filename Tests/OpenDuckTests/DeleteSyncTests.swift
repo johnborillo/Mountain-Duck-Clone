@@ -127,6 +127,34 @@ final class DeleteSyncTests: XCTestCase {
         XCTAssertFalse(volumeManager.isHydratingPath("/tmp/test/file.txt"))
     }
 
+    func testLocalDirectoryCreationCreatesRemoteDirectory() async throws {
+        let adapter = MockFileSystemAdapter()
+        try await adapter.connect()
+        let cacheEngine = CacheEngine(
+            cacheDirectory: cacheDir,
+            journalURL: tempDir.appendingPathComponent("journal.json")
+        )
+        let context = WatcherContext(
+            volumeURL: tempDir,
+            remoteRootPath: "/",
+            adapter: adapter,
+            cacheEngine: cacheEngine,
+            manager: VolumeMountManager(),
+            isReadOnly: false
+        )
+        let folder = tempDir.appendingPathComponent("new-folder")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        context.handleEvent(
+            localPath: folder.path,
+            flags: 0x00000100 | 0x00020000 // ItemCreated | ItemIsDir
+        )
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        let remote = try await adapter.stat(path: "/new-folder")
+        XCTAssertTrue(remote.isDirectory)
+    }
+
     // MARK: - Defect 5: Provenance tokens should persist in SQLite
 
     func testProvenanceTokenPersistsInDatabase() {
