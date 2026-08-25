@@ -8,6 +8,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     public let cacheEngine: CacheEngine
     public let connectionManager: ConnectionManager
 
+    /// Bounds the number of concurrent file uploads to prevent SSH channel exhaustion.
+    /// Without this, Finder can trigger 97+ simultaneous upload Tasks, each spawning
+    /// 8 concurrent chunk writes = ~776 in-flight SFTP requests on a single channel.
+    private let transferQueue = AsyncTransferQueue(maxConcurrent: 4)
+
     public required init(domain: NSFileProviderDomain) {
         self.domain = domain
         let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
@@ -109,6 +114,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 if isDir {
                     try await adapter.createDirectory(path: remotePath)
                 } else if let localURL = url {
+                    await self.transferQueue.acquire()
+                    defer { Task { await self.transferQueue.release() } }
                     try await adapter.upload(from: localURL, to: remotePath, progress: progress)
                 }
 
@@ -152,6 +159,8 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
                 if let fileURL = newContents {
                     self.cacheEngine.markDirty(itemIdentifier: item.itemIdentifier.rawValue, newLocalURL: fileURL)
+                    await self.transferQueue.acquire()
+                    defer { Task { await self.transferQueue.release() } }
                     try await adapter.upload(from: fileURL, to: remotePath, progress: progress)
                 }
 

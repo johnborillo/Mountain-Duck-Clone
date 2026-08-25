@@ -246,6 +246,7 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             flags: openFlags
         )
 
+        var offset: UInt64 = resumeOffset
         do {
             let fileHandle = try FileHandle(forReadingFrom: localURL)
             defer { try? fileHandle.close() }
@@ -255,10 +256,8 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
                 progress?.completedUnitCount = Int64(resumeOffset)
             }
 
-            let chunkSize = 256 * 1024 // High-throughput 256 KB chunk
-            let maxConcurrentChunks = 32 // 32 * 256 KB = 8 MB in-flight pipelined window
-            var offset: UInt64 = resumeOffset
-
+            let chunkSize = 64 * 1024 // 64 KB chunk (balanced with Citadel's 32 KB write slices)
+            let maxConcurrentChunks = 8 // 512 KB in-flight per file window to prevent socket buffer exhaustion
             try await withThrowingTaskGroup(of: Int.self) { group in
                 var inFlight = 0
                 var totalUploaded: Int64 = Int64(resumeOffset)
@@ -304,15 +303,21 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             if resumeOffset == 0 && (error is CancellationError == false) {
                 try? await sftp.remove(at: stagingRemotePath)
             }
-            throw error
+            throw Self.mapSFTPError(error, context: "uploading to '\(resolved)'")
         }
 
-        // Atomic Rename staging -> final destination
+        // Atomic Rename staging -> final destination (with overwrite fallback)
         do {
             try await sftp.rename(at: stagingRemotePath, to: resolved)
         } catch {
-            try? await sftp.remove(at: stagingRemotePath)
-            throw AdapterError.networkError("SFTP atomic commit failed: \(error.localizedDescription)")
+            // SFTP v3 standard rename fails if destination already exists; unlink destination and retry
+            try? await sftp.remove(at: resolved)
+            do {
+                try await sftp.rename(at: stagingRemotePath, to: resolved)
+            } catch {
+                // Last resort: staging file is intact on server for future resume
+                throw AdapterError.serverError("Upload completed but rename from staging path failed: \(error.localizedDescription)")
+            }
         }
 
         progress?.completedUnitCount = localSize
@@ -406,6 +411,25 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
         try await sftp.createDirectory(atPath: resolved)
     }
 
+    /// Recursively ensures that all parent directory components for a given remote file path exist on the remote server.
+    private func ensureRemoteDirectoryTree(for remoteFilePath: String) async throws {
+        let sftp = try getSFTP()
+        let parentPath = (remoteFilePath as NSString).deletingLastPathComponent
+
+        guard !parentPath.isEmpty, parentPath != "/" else { return }
+
+        // Check if parent already exists
+        if let _ = try? await sftp.getAttributes(at: parentPath) {
+            return
+        }
+
+        // Recursively ensure grandparent exists first
+        try await ensureRemoteDirectoryTree(for: parentPath)
+
+        // Create the parent directory
+        try? await sftp.createDirectory(atPath: parentPath)
+    }
+
     public func delete(remotePath: String) async throws {
         let sftp = try getSFTP()
         let resolved = resolvePath(remotePath)
@@ -451,5 +475,45 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
         let src = resolvePath(sourcePath)
         let dst = resolvePath(destinationPath)
         try await sftp.rename(at: src, to: dst)
+    }
+
+    // MARK: - SFTP Error Translation
+
+    /// Maps raw Citadel SFTP errors to human-readable `AdapterError` types.
+    ///
+    /// Without this mapping, errors like `SFTPMessage.Status error 1` propagate as
+    /// cryptic messages to the UI. This translates known SFTP status codes into
+    /// meaningful domain errors.
+    internal static func mapSFTPError(_ error: Error, context: String) -> Error {
+        // Preserve cancellation errors as-is
+        if error is CancellationError { return error }
+        // Preserve already-mapped AdapterErrors
+        if error is AdapterError { return error }
+
+        let description = String(describing: error)
+
+        // Match Citadel SFTPMessage.Status errors by their string representation
+        // Status 1 = SSH_FX_EOF: channel/handle exhaustion from too many concurrent requests
+        if description.contains("Status error 1") || description.contains("eof") {
+            return AdapterError.networkError(
+                "SFTP channel closed unexpectedly (SSH_FX_EOF) while \(context). "
+                + "This typically indicates too many concurrent operations overwhelmed the SSH channel."
+            )
+        }
+        // Status 2 = SSH_FX_NO_SUCH_FILE
+        if description.contains("Status error 2") {
+            return AdapterError.fileNotFound(context)
+        }
+        // Status 3 = SSH_FX_PERMISSION_DENIED
+        if description.contains("Status error 3") {
+            return AdapterError.permissionDenied(context)
+        }
+        // Status 4 = SSH_FX_FAILURE (generic server-side failure)
+        if description.contains("Status error 4") {
+            return AdapterError.serverError("SFTP operation failed while \(context): \(description)")
+        }
+
+        // Catch-all for other Citadel/NIO errors
+        return AdapterError.networkError("SFTP error while \(context): \(error.localizedDescription)")
     }
 }

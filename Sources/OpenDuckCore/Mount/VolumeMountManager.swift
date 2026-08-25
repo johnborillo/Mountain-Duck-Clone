@@ -182,7 +182,17 @@ public final class VolumeMountManager: @unchecked Sendable {
         try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: localURL.path)
         try FileManager.default.createDirectory(at: localURL, withIntermediateDirectories: true)
 
-        let remoteItems = try await adapter.listDirectory(path: remotePath)
+        let remoteItems: [RemoteFileEntry]
+        do {
+            remoteItems = try await adapter.listDirectory(path: remotePath)
+        } catch {
+            // Directory does not exist on remote server yet (e.g. user created or dropped folder locally)
+            if !isReadOnly {
+                try? await adapter.createDirectory(path: remotePath)
+            }
+            sync { populatedDirs.insert(remotePath) }
+            return []
+        }
         let remoteNames = Set(remoteItems.map { $0.name })
         let volumeName = localURL.pathComponents.count > 2 ? localURL.pathComponents[2] : "OpenDuck"
 
@@ -482,34 +492,7 @@ public final class VolumeMountManager: @unchecked Sendable {
 // MARK: - Transfer Queue & Concurrency Control
 
 /// Actor controlling maximum concurrent active file transfers to prevent socket exhaustion and TCP congestion collapse.
-public actor AsyncTransferQueue {
-    private let maxConcurrent: Int
-    private var inFlight: Int = 0
-    private var waitQueue: [CheckedContinuation<Void, Never>] = []
-
-    public init(maxConcurrent: Int = 4) {
-        self.maxConcurrent = maxConcurrent
-    }
-
-    public func acquire() async {
-        if inFlight < maxConcurrent {
-            inFlight += 1
-            return
-        }
-        await withCheckedContinuation { continuation in
-            waitQueue.append(continuation)
-        }
-    }
-
-    public func release() {
-        if !waitQueue.isEmpty {
-            let next = waitQueue.removeFirst()
-            next.resume()
-        } else {
-            inFlight = max(0, inFlight - 1)
-        }
-    }
-}
+// AsyncTransferQueue is now defined in Concurrency/AsyncTransferQueue.swift
 
 // MARK: - Watcher Context & Safe Event Dispatcher
 
