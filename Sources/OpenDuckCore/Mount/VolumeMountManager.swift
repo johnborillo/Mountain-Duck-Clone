@@ -253,20 +253,37 @@ public final class VolumeMountManager: @unchecked Sendable {
 
         sync { populatedDirs.insert(remotePath) }
 
-        // Background progressive hydration: stream down real binary file data in background
+        // Background progressive hydration: stream down real binary file data in bounded parallel task group
         Task.detached(priority: .utility) { [weak self, weak cacheEngine] in
             guard let self = self, let cacheEngine = cacheEngine else { return }
-            for item in remoteItems where !item.isDirectory {
-                let localItemURL = localURL.appendingPathComponent(item.name)
-                if self.isPlaceholder(path: localItemURL.path) {
-                    try? await self.hydrateFile(
-                        localPath: localItemURL.path,
-                        remotePath: item.path,
-                        adapter: adapter,
-                        cacheEngine: cacheEngine,
-                        isReadOnly: isReadOnly
-                    )
+            let placeholders = remoteItems.filter { !$0.isDirectory }
+
+            // Bounded parallel hydration: stream up to 3 files concurrently
+            await withTaskGroup(of: Void.self) { group in
+                var inFlight = 0
+                let maxConcurrentHydrations = 3
+
+                for item in placeholders {
+                    let localItemURL = localURL.appendingPathComponent(item.name)
+                    guard self.isPlaceholder(path: localItemURL.path) else { continue }
+
+                    group.addTask {
+                        try? await self.hydrateFile(
+                            localPath: localItemURL.path,
+                            remotePath: item.path,
+                            adapter: adapter,
+                            cacheEngine: cacheEngine,
+                            isReadOnly: isReadOnly
+                        )
+                    }
+                    inFlight += 1
+
+                    if inFlight >= maxConcurrentHydrations {
+                        await group.next()
+                        inFlight -= 1
+                    }
                 }
+                await group.waitForAll()
             }
         }
 
@@ -462,6 +479,38 @@ public final class VolumeMountManager: @unchecked Sendable {
     }
 }
 
+// MARK: - Transfer Queue & Concurrency Control
+
+/// Actor controlling maximum concurrent active file transfers to prevent socket exhaustion and TCP congestion collapse.
+public actor AsyncTransferQueue {
+    private let maxConcurrent: Int
+    private var inFlight: Int = 0
+    private var waitQueue: [CheckedContinuation<Void, Never>] = []
+
+    public init(maxConcurrent: Int = 4) {
+        self.maxConcurrent = maxConcurrent
+    }
+
+    public func acquire() async {
+        if inFlight < maxConcurrent {
+            inFlight += 1
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waitQueue.append(continuation)
+        }
+    }
+
+    public func release() {
+        if !waitQueue.isEmpty {
+            let next = waitQueue.removeFirst()
+            next.resume()
+        } else {
+            inFlight = max(0, inFlight - 1)
+        }
+    }
+}
+
 // MARK: - Watcher Context & Safe Event Dispatcher
 
 public final class WatcherContext: @unchecked Sendable {
@@ -481,6 +530,7 @@ public final class WatcherContext: @unchecked Sendable {
     private var deletionTimestamps: [Date] = []
     public private(set) var isCircuitBreakerTripped: Bool = false
     private var isStopped: Bool = false
+    private let transferQueue = AsyncTransferQueue(maxConcurrent: 4)
     private let lock = NSLock()
 
     public func invalidate() {
@@ -580,9 +630,7 @@ public final class WatcherContext: @unchecked Sendable {
                 path: "MASS_DELETION_BREAKER",
                 reason: "\(reason) Remote storage protected."
             )
-            DispatchQueue.main.async {
-                self.onStatusChange?("⚠️ SAFETY CIRCUIT BREAKER TRIPPED: \(reason) Remote storage protected.")
-            }
+            self.onStatusChange?("⚠️ SAFETY CIRCUIT BREAKER TRIPPED: \(reason) Remote storage protected.")
             return false
         }
         return true
@@ -597,9 +645,12 @@ public final class WatcherContext: @unchecked Sendable {
 
         let filename = (localPath as NSString).lastPathComponent
 
-        // Ignore macOS system, metadata, swap files, atomic temp files, and Trash folders
+        // Ignore macOS system, metadata, swap files, atomic temp files, internal staging files, and Trash folders
         if filename == ".DS_Store" ||
            filename.hasPrefix("._") ||
+           filename.hasPrefix(".openduck") ||
+           filename.contains(".openduck_") ||
+           filename.contains("openduck_dl_") ||
            filename == ".Spotlight-V100" ||
            filename.hasPrefix(".Trash") ||
            localPath.contains("/.Trashes") ||
@@ -764,7 +815,9 @@ public final class WatcherContext: @unchecked Sendable {
                 }
 
                 let uploadTask = Task {
+                    await self.transferQueue.acquire()
                     defer {
+                        Task { await self.transferQueue.release() }
                         self.lock.withLock {
                             self.activeUploadTasks.removeValue(forKey: remotePath)
                             self.activeTrackers.removeValue(forKey: remotePath)
@@ -773,6 +826,7 @@ public final class WatcherContext: @unchecked Sendable {
                     }
 
                     do {
+                        try Task.checkCancellation()
                         self.onStatusChange?("Uploading \(filename)...")
                         try await self.adapter.upload(from: localURL, to: remotePath, progress: progress)
                         tracker.markCompleted()

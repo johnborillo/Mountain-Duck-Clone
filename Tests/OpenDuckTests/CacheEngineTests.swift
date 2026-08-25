@@ -1,30 +1,31 @@
 import Foundation
-import Testing
-@testable import OpenDuckCore
+import OpenDuckCore
 
-@Suite final class CacheEngineTests {
-    var tempCacheDir: URL
+final class CacheEngineTests: XCTestCase {
+    var tempCacheDir: URL!
 
-    init() {
+    override func setUpWithError() throws {
+        try super.setUpWithError()
         tempCacheDir = FileManager.default.temporaryDirectory.appendingPathComponent("omd-cache-unit-test-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: tempCacheDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tempCacheDir, withIntermediateDirectories: true)
     }
 
-    deinit {
+    override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: tempCacheDir)
+        try super.tearDownWithError()
     }
 
-    @Test func placeholderRegistration() {
+    func testPlaceholderRegistration() {
         let engine = CacheEngine(cacheDirectory: tempCacheDir)
         let entry = RemoteFileEntry(name: "test.txt", path: "/data/test.txt", size: 1024)
 
         let cached = engine.registerPlaceholder(for: entry)
-        #expect(cached.localFileName == "test.txt")
-        #expect(cached.state == .placeholder)
-        #expect(cached.fileSize == 1024)
+        XCTAssertEqual(cached.localFileName, "test.txt")
+        XCTAssertEqual(cached.state, .placeholder)
+        XCTAssertEqual(cached.fileSize, 1024)
     }
 
-    @Test func hydrationAndDirtySync() async throws {
+    func testHydrationAndDirtySync() async throws {
         let adapter = MockFileSystemAdapter()
         try await adapter.connect()
         adapter.seedFile(path: "/data/config.json", content: "{\"version\": 1}")
@@ -39,9 +40,9 @@ import Testing
             adapter: adapter
         )
 
-        #expect(FileManager.default.fileExists(atPath: localURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: localURL.path))
         let initialContent = try String(contentsOf: localURL, encoding: .utf8)
-        #expect(initialContent == "{\"version\": 1}")
+        XCTAssertEqual(initialContent, "{\"version\": 1}")
 
         // 2. Modify locally & mark dirty
         let modifiedContent = "{\"version\": 2, \"updated\": true}"
@@ -49,22 +50,22 @@ import Testing
         engine.markDirty(itemIdentifier: fileId, newLocalURL: localURL)
 
         let stats = engine.statistics()
-        #expect(stats.dirtyItems == 1)
+        XCTAssertEqual(stats.dirtyItems, 1)
 
         // 3. Sync pending writes
         try await engine.syncPendingWrites(with: adapter)
 
         let postSyncStats = engine.statistics()
-        #expect(postSyncStats.dirtyItems == 0)
+        XCTAssertEqual(postSyncStats.dirtyItems, 0)
 
         // 4. Verify remote has updated data
         let verifyURL = tempCacheDir.appendingPathComponent("verify.json")
         try await adapter.download(remotePath: "/data/config.json", to: verifyURL, progress: nil)
         let remoteContent = try String(contentsOf: verifyURL, encoding: .utf8)
-        #expect(remoteContent == modifiedContent)
+        XCTAssertEqual(remoteContent, modifiedContent)
     }
 
-    @Test func lruEvictionPolicy() {
+    func testLruEvictionPolicy() {
         let policy = LRUEvictionPolicy(maxCacheSizeBytes: 1000, lowWatermarkPercentage: 0.5)
 
         let now = Date()
@@ -77,11 +78,11 @@ import Testing
         let victims = policy.selectEntriesForEviction(from: [entry1, entry2, entry3])
         // Total = 1200 > 1000. Target = 500. Needs to free 700 bytes.
         // entry3 is pinned, so only entry1 (oldest) and entry2 are candidates.
-        #expect(victims.contains { $0.itemIdentifier == "1" })
-        #expect(!victims.contains { $0.itemIdentifier == "3" }) // Pinned items must never be evicted
+        XCTAssertTrue(victims.contains { $0.itemIdentifier == "1" })
+        XCTAssertFalse(victims.contains { $0.itemIdentifier == "3" }) // Pinned items must never be evicted
     }
 
-    @Test func purgeUnpinnedProtectsDirtyAndPinnedFiles() async throws {
+    func testPurgeUnpinnedProtectsDirtyAndPinnedFiles() async throws {
         let adapter = MockFileSystemAdapter()
         try await adapter.connect()
         adapter.seedFile(path: "/data/clean.txt", content: "clean unpinned content")
@@ -104,24 +105,24 @@ import Testing
         try unuploadedEdit.write(to: dirtyURL, atomically: true, encoding: .utf8)
         engine.markDirty(itemIdentifier: dirtyId, newLocalURL: dirtyURL)
 
-        #expect(FileManager.default.fileExists(atPath: cleanURL.path))
-        #expect(FileManager.default.fileExists(atPath: pinnedURL.path))
-        #expect(FileManager.default.fileExists(atPath: dirtyURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cleanURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pinnedURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dirtyURL.path))
 
         // Execute purge
         try engine.purgeUnpinned()
 
         // Clean unpinned file MUST be evicted
-        #expect(!FileManager.default.fileExists(atPath: cleanURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cleanURL.path))
 
         // Pinned file MUST survive
-        #expect(FileManager.default.fileExists(atPath: pinnedURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pinnedURL.path))
         let pinnedContent = try String(contentsOf: pinnedURL, encoding: .utf8)
-        #expect(pinnedContent == "pinned content")
+        XCTAssertEqual(pinnedContent, "pinned content")
 
         // Dirty (unuploaded) file MUST survive intact with dirty edits!
-        #expect(FileManager.default.fileExists(atPath: dirtyURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dirtyURL.path))
         let preservedDirtyContent = try String(contentsOf: dirtyURL, encoding: .utf8)
-        #expect(preservedDirtyContent == unuploadedEdit)
+        XCTAssertEqual(preservedDirtyContent, unuploadedEdit)
     }
 }

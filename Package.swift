@@ -68,7 +68,7 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
-        .testTarget(
+        .executableTarget(
             name: "OpenDuckTests",
             dependencies: [
                 "OpenDuckCore"

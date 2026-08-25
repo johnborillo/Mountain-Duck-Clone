@@ -155,6 +155,9 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
                 for item in nameMsg.components {
                     let filename = item.filename
                     if filename == "." || filename == ".." { continue }
+                    if filename.hasPrefix(".openduck_") || filename.contains(".openduck_stage_") || filename.contains(".openduck_dl_") {
+                        continue
+                    }
 
                     let itemPath = resolved == "/" ? "/\(filename)" : "\(resolved)/\(filename)"
                     let isDir = (item.attributes.permissions ?? 0) & 0o040000 != 0
@@ -224,26 +227,41 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
         progress?.totalUnitCount = localSize
         progress?.completedUnitCount = 0
 
-        // Atomic Staging: upload to staging file first
-        let stagingSuffix = ".openduck_staging_\(UUID().uuidString.prefix(8))"
-        let stagingRemotePath = resolved + stagingSuffix
+        // Deterministic Staging Path for Resume Support
+        let hash = Insecure.MD5.hash(data: Data(resolved.utf8)).map { String(format: "%02x", $0) }.joined()
+        let stagingRemotePath = "\(resolved).openduck_stage_\(hash.prefix(12))"
+
+        // Check if a partial staging file exists for offset-based resumption
+        var resumeOffset: UInt64 = 0
+        var openFlags: SFTPOpenFileFlags = [.write, .create, .truncate]
+
+        if localSize > 0, let existingAttrs = try? await sftp.getAttributes(at: stagingRemotePath),
+           let existingSize = existingAttrs.size, existingSize > 0, existingSize < UInt64(localSize) {
+            resumeOffset = existingSize
+            openFlags = [.write, .create] // Open without truncate to resume
+        }
 
         let stagingFile = try await sftp.openFile(
             filePath: stagingRemotePath,
-            flags: [.write, .create, .truncate]
+            flags: openFlags
         )
 
         do {
             let fileHandle = try FileHandle(forReadingFrom: localURL)
             defer { try? fileHandle.close() }
 
-            let chunkSize = 64 * 1024 // 64 KB chunk
-            let maxConcurrentChunks = 16 // 16 * 64KB = 1 MB in-flight pipelined window
-            var offset: UInt64 = 0
+            if resumeOffset > 0 {
+                try fileHandle.seek(toOffset: resumeOffset)
+                progress?.completedUnitCount = Int64(resumeOffset)
+            }
+
+            let chunkSize = 256 * 1024 // High-throughput 256 KB chunk
+            let maxConcurrentChunks = 32 // 32 * 256 KB = 8 MB in-flight pipelined window
+            var offset: UInt64 = resumeOffset
 
             try await withThrowingTaskGroup(of: Int.self) { group in
                 var inFlight = 0
-                var totalUploaded: Int64 = 0
+                var totalUploaded: Int64 = Int64(resumeOffset)
 
                 while let chunk = try fileHandle.read(upToCount: chunkSize), !chunk.isEmpty {
                     try Task.checkCancellation()
@@ -281,7 +299,11 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             try await stagingFile.close()
         } catch {
             try? await stagingFile.close()
-            try? await sftp.remove(at: stagingRemotePath)
+            // On cancellation or network error, retain staging file if partial bytes were uploaded for resumption.
+            // On fatal non-cancellation errors with 0 bytes, cleanup.
+            if resumeOffset == 0 && (error is CancellationError == false) {
+                try? await sftp.remove(at: stagingRemotePath)
+            }
             throw error
         }
 
@@ -301,25 +323,81 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
         let resolved = resolvePath(remotePath)
 
         let remoteFile = try await sftp.openFile(filePath: resolved, flags: [.read])
+
         let attrs = try? await sftp.getAttributes(at: resolved)
         let totalSize = Int64(attrs?.size ?? 0)
         progress?.totalUnitCount = totalSize
         progress?.completedUnitCount = 0
 
-        let byteBuffer = try await remoteFile.readAll()
-        try await remoteFile.close()
-
         let parentDir = localURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
 
-        let tempURL = parentDir.appendingPathComponent(".openduck_dl_\(UUID().uuidString)")
-        let data = Data(byteBuffer.readableBytesView)
-        try data.write(to: tempURL, options: .atomic)
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("openduck_dl_\(UUID().uuidString).tmp")
+        FileManager.default.createFile(atPath: tempURL.path, contents: nil)
+
+        let writeHandle = try FileHandle(forWritingTo: tempURL)
+        if totalSize > 0 {
+            try? writeHandle.truncate(atOffset: UInt64(totalSize))
+        }
+
+        let chunkSize = 256 * 1024 // 256 KB chunk
+        let maxConcurrentChunks = 32 // 8 MB in-flight window
+        let totalBytesToRead = UInt64(totalSize)
+
+        do {
+            if totalBytesToRead > 0 {
+                try await withThrowingTaskGroup(of: (UInt64, ByteBuffer).self) { group in
+                    var inFlight = 0
+                    var requestOffset: UInt64 = 0
+                    var totalDownloaded: Int64 = 0
+
+                    while requestOffset < totalBytesToRead {
+                        try Task.checkCancellation()
+
+                        let currentOffset = requestOffset
+                        let bytesRemaining = totalBytesToRead - currentOffset
+                        let currentLength = UInt32(Swift.min(UInt64(chunkSize), bytesRemaining))
+                        requestOffset += UInt64(currentLength)
+
+                        group.addTask {
+                            try Task.checkCancellation()
+                            let buffer = try await remoteFile.read(from: currentOffset, length: currentLength)
+                            return (currentOffset, buffer)
+                        }
+                        inFlight += 1
+
+                        if inFlight >= maxConcurrentChunks {
+                            if let (offset, buffer) = try await group.next() {
+                                inFlight -= 1
+                                try writeHandle.seek(toOffset: offset)
+                                try writeHandle.write(contentsOf: buffer.readableBytesView)
+                                totalDownloaded += Int64(buffer.readableBytes)
+                                progress?.completedUnitCount = totalDownloaded
+                            }
+                        }
+                    }
+
+                    while let (offset, buffer) = try await group.next() {
+                        try writeHandle.seek(toOffset: offset)
+                        try writeHandle.write(contentsOf: buffer.readableBytesView)
+                        totalDownloaded += Int64(buffer.readableBytes)
+                        progress?.completedUnitCount = totalDownloaded
+                    }
+                }
+            }
+            try writeHandle.close()
+            try await remoteFile.close()
+        } catch {
+            try? writeHandle.close()
+            try? await remoteFile.close()
+            try? FileManager.default.removeItem(at: tempURL)
+            throw error
+        }
 
         _ = try? FileManager.default.removeItem(at: localURL)
         try FileManager.default.moveItem(at: tempURL, to: localURL)
 
-        progress?.completedUnitCount = totalSize > 0 ? totalSize : Int64(data.count)
+        progress?.completedUnitCount = totalSize
     }
 
     public func createDirectory(path: String) async throws {

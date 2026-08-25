@@ -1,20 +1,21 @@
 import Foundation
-import Testing
-@testable import OpenDuckCore
+import OpenDuckCore
 
-@Suite final class CircuitBreakerTests {
-    var tempDir: URL
+final class CircuitBreakerTests: XCTestCase {
+    var tempDir: URL!
 
-    init() {
+    override func setUpWithError() throws {
+        try super.setUpWithError()
         tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("omd-breaker-test-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     }
 
-    deinit {
+    override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: tempDir)
+        try super.tearDownWithError()
     }
 
-    @Test func circuitBreakerBurstAndSustainedTriggers() async throws {
+    func testCircuitBreakerBurstAndSustainedTriggers() async throws {
         let adapter = MockFileSystemAdapter()
         try await adapter.connect()
 
@@ -23,17 +24,17 @@ import Testing
         let volumeManager = VolumeMountManager()
 
         final class StatusBox: @unchecked Sendable {
-            var message: String?
+            var messages: [String] = []
             private let lock = NSLock()
-            func set(_ msg: String) {
+            func add(_ msg: String) {
                 lock.lock()
-                message = msg
+                messages.append(msg)
                 lock.unlock()
             }
-            func get() -> String? {
+            func all() -> [String] {
                 lock.lock()
                 defer { lock.unlock() }
-                return message
+                return messages
             }
         }
 
@@ -46,11 +47,11 @@ import Testing
             manager: volumeManager,
             isReadOnly: false,
             onStatusChange: { msg in
-                statusBox.set(msg)
+                statusBox.add(msg)
             }
         )
 
-        #expect(!context.isCircuitBreakerTripped)
+        XCTAssertFalse(context.isCircuitBreakerTripped)
 
         // Simulate 15 rapid deletions in < 1 second to trigger burst breaker
         for i in 1...15 {
@@ -58,15 +59,15 @@ import Testing
             context.handleEvent(localPath: fakePath, flags: 0x00000200) // kFSEventStreamEventFlagItemRemoved
         }
 
-        #expect(context.isCircuitBreakerTripped)
-        #expect(statusBox.get()?.contains("CIRCUIT BREAKER TRIPPED") == true)
+        XCTAssertTrue(context.isCircuitBreakerTripped)
+        XCTAssertTrue(statusBox.all().contains { $0.contains("CIRCUIT BREAKER TRIPPED") })
 
         // Verify divergence event was recorded in DB
         let events = MetadataDatabase.shared.allDivergenceEvents()
-        #expect(events.contains { $0.path == "MASS_DELETION_BREAKER" })
+        XCTAssertTrue(events.contains { $0.path == "MASS_DELETION_BREAKER" })
 
         // Test explicit reset
         context.resetCircuitBreaker()
-        #expect(!context.isCircuitBreakerTripped)
+        XCTAssertFalse(context.isCircuitBreakerTripped)
     }
 }

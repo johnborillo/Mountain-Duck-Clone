@@ -1,38 +1,39 @@
 import Foundation
-import Testing
 import NIOCore
 import NIOPosix
 import NIOSSH
 import Crypto
-@testable import OpenDuckCore
+import OpenDuckCore
 
-@Suite final class HostKeyValidatorTests {
-    var tempDBDir: URL
-    var eventLoopGroup: MultiThreadedEventLoopGroup
+final class HostKeyValidatorTests: XCTestCase {
+    var tempDBDir: URL!
+    var eventLoopGroup: MultiThreadedEventLoopGroup!
 
-    init() {
+    override func setUpWithError() throws {
+        try super.setUpWithError()
         tempDBDir = FileManager.default.temporaryDirectory.appendingPathComponent("omd-hostkey-test-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: tempDBDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tempDBDir, withIntermediateDirectories: true)
         eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     }
 
-    deinit {
+    override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: tempDBDir)
         try? eventLoopGroup.syncShutdownGracefully()
+        try super.tearDownWithError()
     }
 
-    @Test func fingerprintCalculationFormat() {
+    func testFingerprintCalculationFormat() {
         // Known test payload: Base64 data with padding
         let testData = "OpenDuck-SSH-Host-Key-Test-Payload-12345".data(using: .utf8)!
         let hash = SHA256.hash(data: testData)
         let rawB64 = Data(hash).base64EncodedString()
         let stripped = "SHA256:" + rawB64.replacingOccurrences(of: "=", with: "")
 
-        #expect(!stripped.hasSuffix("="))
-        #expect(stripped.hasPrefix("SHA256:"))
+        XCTAssertFalse(stripped.hasSuffix("="))
+        XCTAssertTrue(stripped.hasPrefix("SHA256:"))
     }
 
-    @Test func tofuFirstContactAndMismatchDetection() async throws {
+    func testTofuFirstContactAndMismatchDetection() async throws {
         let dbURL = tempDBDir.appendingPathComponent("test_tofu.sqlite")
         let db = MetadataDatabase(databaseURL: dbURL)
 
@@ -45,19 +46,19 @@ import Crypto
         )
 
         let retrieved = db.pinnedFingerprint(forHost: "test.example.com", port: 22)
-        #expect(retrieved == "SHA256:InitialPinnedFingerprint123")
+        XCTAssertEqual(retrieved, "SHA256:InitialPinnedFingerprint123")
 
         let validator = OpenDuckHostKeyValidator(host: "test.example.com", port: 22)
-        #expect(!validator.mismatchDetected)
-        #expect(validator.validatedFingerprint == nil)
+        XCTAssertFalse(validator.mismatchDetected)
+        XCTAssertNil(validator.validatedFingerprint)
     }
 
-    @Test func fingerprintNormalizationAndLegacyPaddedHealing() {
+    func testFingerprintNormalizationAndLegacyPaddedHealing() {
         let padded = "SHA256:XusFL7Hj8Djw0EkH/vtG5YdVTPlsfKeHG7PF+WNdfpk="
         let unpadded = "SHA256:XusFL7Hj8Djw0EkH/vtG5YdVTPlsfKeHG7PF+WNdfpk"
 
-        #expect(OpenDuckHostKeyValidator.normalizeFingerprint(padded) == unpadded)
-        #expect(OpenDuckHostKeyValidator.normalizeFingerprint(unpadded) == unpadded)
+        XCTAssertEqual(OpenDuckHostKeyValidator.normalizeFingerprint(padded), unpadded)
+        XCTAssertEqual(OpenDuckHostKeyValidator.normalizeFingerprint(unpadded), unpadded)
 
         let dbURL = tempDBDir.appendingPathComponent("test_heal.sqlite")
         let db = MetadataDatabase(databaseURL: dbURL)
@@ -66,6 +67,6 @@ import Crypto
         db.pinHostKey(host: "legacy.example.com", port: 22, keyType: "ssh-ed25519", fingerprint: padded)
 
         let retrieved = db.pinnedFingerprint(forHost: "legacy.example.com", port: 22)
-        #expect(retrieved == unpadded) // Auto-healed on insert and migration
+        XCTAssertEqual(retrieved, unpadded) // Auto-healed on insert and migration
     }
 }

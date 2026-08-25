@@ -8,7 +8,7 @@ APPEX_BUNDLE="$APP_BUNDLE/Contents/PlugIns/OpenDuckFileProvider.appex"
 
 echo "🦆 Building OpenDuck release binaries..."
 cd "$PROJECT_ROOT"
-swift build -c release
+swift build -c release --product OpenDuckApp --product OpenDuckExtension
 
 echo "📦 Assembling macOS Application Bundle..."
 rm -rf "$BUILD_DIR"

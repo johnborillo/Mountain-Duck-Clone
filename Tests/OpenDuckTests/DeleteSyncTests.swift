@@ -1,24 +1,25 @@
 import Foundation
-import Testing
-@testable import OpenDuckCore
+import OpenDuckCore
 
-@Suite final class DeleteSyncTests {
-    var tempDir: URL
-    var cacheDir: URL
+final class DeleteSyncTests: XCTestCase {
+    var tempDir: URL!
+    var cacheDir: URL!
 
-    init() {
+    override func setUpWithError() throws {
+        try super.setUpWithError()
         tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("omd-delete-test-\(UUID().uuidString)")
         cacheDir = tempDir.appendingPathComponent("cache")
-        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
     }
 
-    deinit {
+    override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: tempDir)
+        try super.tearDownWithError()
     }
 
     // MARK: - Defect 1: Failed deletes should be journaled for retry
 
-    @Test func failedDeleteIsJournaledForRetry() async throws {
+    func testFailedDeleteIsJournaledForRetry() async throws {
         let adapter = MockFileSystemAdapter()
         try await adapter.connect()
 
@@ -27,9 +28,9 @@ import Testing
         try await adapter.upload(from: createTempFile(content: testContent), to: "/test.txt", progress: nil)
 
         // Configure adapter to fail on next delete
-        adapter.setSimulatedError(AdapterError.networkError("Connection timeout"))
+        adapter.simulatedError = AdapterError.networkError("Connection timeout")
 
-        let journalURL = tempDir.appendingPathComponent("journal.json")
+        let journalURL = tempDir.appendingPathComponent("journal_\(UUID().uuidString).json")
         let cacheEngine = CacheEngine(cacheDirectory: cacheDir, journalURL: journalURL)
         let volumeManager = VolumeMountManager()
 
@@ -60,20 +61,20 @@ import Testing
         )
 
         // Wait for the async Task to execute
-        try await Task.sleep(for: .milliseconds(500))
+        try await Task.sleep(nanoseconds: 500_000_000)
 
         // The deletion should have been journaled because the adapter was set to fail
         let pending = cacheEngine.journal.pendingEntries()
-        #expect(pending.contains { $0.action == .delete && $0.remotePath == "/test.txt" })
+        XCTAssertTrue(pending.contains { $0.action == .delete && $0.remotePath == "/test.txt" })
     }
 
     // MARK: - Defect 4: Circuit breaker blocked deletes should be journaled
 
-    @Test func circuitBreakerBlockedDeletesAreJournaled() async throws {
+    func testCircuitBreakerBlockedDeletesAreJournaled() async throws {
         let adapter = MockFileSystemAdapter()
         try await adapter.connect()
 
-        let journalURL = tempDir.appendingPathComponent("journal.json")
+        let journalURL = tempDir.appendingPathComponent("journal_\(UUID().uuidString).json")
         let cacheEngine = CacheEngine(cacheDirectory: cacheDir, journalURL: journalURL)
         let volumeManager = VolumeMountManager()
 
@@ -99,58 +100,57 @@ import Testing
         }
 
         // Circuit breaker should be tripped
-        #expect(context.isCircuitBreakerTripped)
+        XCTAssertTrue(context.isCircuitBreakerTripped)
 
         // Wait for async tasks
-        try await Task.sleep(for: .milliseconds(500))
+        try await Task.sleep(nanoseconds: 500_000_000)
 
         // Deletions blocked by the circuit breaker should be in the journal
         let pending = cacheEngine.journal.pendingEntries()
         let deletePending = pending.filter { $0.action == .delete }
         // At least some deletions should be queued (those beyond the burst threshold)
-        #expect(deletePending.count > 0)
+        XCTAssertGreaterThan(deletePending.count, 0)
     }
 
     // MARK: - Defect 6: Hydration should not trigger re-upload
 
-    @Test func hydratingPathTokenPreventsReupload() {
+    func testHydratingPathTokenPreventsReupload() {
         let volumeManager = VolumeMountManager()
 
         // Register a path as being hydrated
         volumeManager.recordHydratingPath("/tmp/test/file.txt")
 
         // Consuming the token should return true
-        #expect(volumeManager.isHydratingPath("/tmp/test/file.txt") == true)
+        XCTAssertTrue(volumeManager.isHydratingPath("/tmp/test/file.txt"))
 
         // Second consumption should return false (token consumed)
-        #expect(volumeManager.isHydratingPath("/tmp/test/file.txt") == false)
+        XCTAssertFalse(volumeManager.isHydratingPath("/tmp/test/file.txt"))
     }
 
     // MARK: - Defect 5: Provenance tokens should persist in SQLite
 
-    @Test func provenanceTokenPersistsInDatabase() {
+    func testProvenanceTokenPersistsInDatabase() {
         let volumeManager = VolumeMountManager()
 
         // Record a self-initiated removal
         volumeManager.recordSelfInitiatedRemoval(path: "/Volumes/Test/somefile.txt")
 
         // Verify it's persisted in the database (bypass in-memory check)
-        let dbResult = MetadataDatabase.shared.consumeSelfInitiatedRemoval(localPath: "/Volumes/Test/somefile.txt")
-        // Note: the in-memory token may have already been consumed by the db call above,
-        // but at minimum one of the layers should have the token
+        _ = MetadataDatabase.shared.consumeSelfInitiatedRemoval(localPath: "/Volumes/Test/somefile.txt")
+
         // Re-record and check via the manager
         volumeManager.recordSelfInitiatedRemoval(path: "/Volumes/Test/anotherfile.txt")
         let found = volumeManager.isSelfInitiatedRemoval(path: "/Volumes/Test/anotherfile.txt")
-        #expect(found == true)
+        XCTAssertTrue(found)
 
         // Token should be consumed now
         let foundAgain = volumeManager.isSelfInitiatedRemoval(path: "/Volumes/Test/anotherfile.txt")
-        #expect(foundAgain == false)
+        XCTAssertFalse(foundAgain)
     }
 
     // MARK: - Defect 3: Recursive directory deletion via SFTPAdapter
 
-    @Test func mockAdapterRecursiveDirectoryDelete() async throws {
+    func testMockAdapterRecursiveDirectoryDelete() async throws {
         let adapter = MockFileSystemAdapter()
         try await adapter.connect()
 
@@ -169,7 +169,7 @@ import Testing
         // Verify everything is gone
         do {
             _ = try await adapter.listDirectory(path: "/parent")
-            Issue.record("Expected directory to be deleted")
+            XCTFail("Expected directory to be deleted")
         } catch {
             // Expected: directory not found
         }
@@ -177,7 +177,7 @@ import Testing
 
     // MARK: - CacheEngine retry scheduler
 
-    @Test func retrySchedulerProcessesPendingDeletes() async throws {
+    func testRetrySchedulerProcessesPendingDeletes() async throws {
         let adapter = MockFileSystemAdapter()
         try await adapter.connect()
 
@@ -185,7 +185,7 @@ import Testing
         let content = Data("hello".utf8)
         try await adapter.upload(from: createTempFile(content: content), to: "/retry_test.txt", progress: nil)
 
-        let journalURL = tempDir.appendingPathComponent("journal.json")
+        let journalURL = tempDir.appendingPathComponent("journal_\(UUID().uuidString).json")
         let cacheEngine = CacheEngine(cacheDirectory: cacheDir, journalURL: journalURL)
 
         // Manually journal a delete entry
@@ -195,18 +195,18 @@ import Testing
             remotePath: "/retry_test.txt"
         )
         cacheEngine.journal.append(entry)
-        #expect(cacheEngine.journal.count == 1)
+        XCTAssertEqual(cacheEngine.journal.count, 1)
 
         // Process pending writes — should execute the delete
         try await cacheEngine.syncPendingWrites(with: adapter)
 
         // Journal should be cleared after successful processing
-        #expect(cacheEngine.journal.count == 0)
+        XCTAssertEqual(cacheEngine.journal.count, 0)
 
         // File should be gone from remote
         do {
             _ = try await adapter.stat(path: "/retry_test.txt")
-            Issue.record("Expected file to be deleted")
+            XCTFail("Expected file to be deleted")
         } catch {
             // Expected: file not found
         }
