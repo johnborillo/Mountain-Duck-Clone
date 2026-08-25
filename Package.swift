@@ -56,6 +56,12 @@ let package = Package(
             path: "Sources/OpenDuckExtension",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
+            ],
+            linkerSettings: [
+                // App extensions are mainless. Foundation's extension host
+                // owns the process entry point and dispatches to the class
+                // named by NSExtensionPrincipalClass.
+                .unsafeFlags(["-Xlinker", "-e", "-Xlinker", "_NSExtensionMain"])
             ]
         ),
         .executableTarget(
@@ -80,4 +86,3 @@ let package = Package(
         )
     ]
 )
-

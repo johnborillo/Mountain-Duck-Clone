@@ -6,7 +6,9 @@ import OpenDuckCore
 @main
 struct OpenDuckExtensionMain {
     static func main() {
-        // macOS File Provider extension runtime lifecycle
-        // Handled by Apple's FileProvider.framework XPC listener
+        // File Provider app extensions enter through Foundation's
+        // `_NSExtensionMain` linker entry point (configured on the target).
+        // This Swift main is intentionally empty; Launch Services never
+        // invokes it for the extension process.
     }
 }

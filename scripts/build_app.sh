@@ -8,7 +8,10 @@ APPEX_BUNDLE="$APP_BUNDLE/Contents/PlugIns/OpenDuckFileProvider.appex"
 
 echo "🦆 Building OpenDuck release binaries..."
 cd "$PROJECT_ROOT"
-swift build -c release --product OpenDuckApp --product OpenDuckExtension
+# SwiftPM accepts one --product per invocation. Building both explicitly
+# prevents a stale host executable from being copied into the new bundle.
+swift build -c release --product OpenDuckApp
+swift build -c release --product OpenDuckExtension
 
 echo "📦 Assembling macOS Application Bundle..."
 rm -rf "$BUILD_DIR"
@@ -39,6 +42,10 @@ cat << 'PLIST' > "$APP_BUNDLE/Contents/Info.plist"
     <string>OpenDuck</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>MacOSX</string>
+    </array>
     <key>CFBundleShortVersionString</key>
     <string>1.0.0</string>
     <key>CFBundleVersion</key>
@@ -71,6 +78,10 @@ cat << 'PLIST' > "$APPEX_BUNDLE/Contents/Info.plist"
     <string>OpenDuckFileProvider</string>
     <key>CFBundlePackageType</key>
     <string>XPC!</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>MacOSX</string>
+    </array>
     <key>CFBundleShortVersionString</key>
     <string>1.0.0</string>
     <key>CFBundleVersion</key>
@@ -79,10 +90,13 @@ cat << 'PLIST' > "$APPEX_BUNDLE/Contents/Info.plist"
     <string>13.0</string>
     <key>NSExtension</key>
     <dict>
+        <key>NSExtensionAttributes</key>
+        <dict>
+            <key>NSExtensionFileProviderDocumentGroup</key>
+            <string>group.com.openduck</string>
+        </dict>
         <key>NSExtensionPointIdentifier</key>
         <string>com.apple.fileprovider-nonui</string>
-        <key>NSExtensionFileProviderDocumentGroup</key>
-        <string>group.com.openduck</string>
         <key>NSExtensionPrincipalClass</key>
         <string>FileProviderExtension</string>
     </dict>
