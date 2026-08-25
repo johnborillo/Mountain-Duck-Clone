@@ -15,6 +15,8 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
     public let isPinned: Bool
     public let isDownloaded: Bool
     public let isUploaded: Bool
+    private let contentVersionData: Data?
+    private let metadataVersionData: Data?
 
     public init(
         itemIdentifier: NSFileProviderItemIdentifier,
@@ -26,7 +28,9 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
         creationDate: Date? = nil,
         isPinned: Bool = false,
         isDownloaded: Bool = true,
-        isUploaded: Bool = true
+        isUploaded: Bool = true,
+        contentVersion: String? = nil,
+        metadataVersion: String? = nil
     ) {
         self.itemIdentifier = itemIdentifier
         self.parentItemIdentifier = parentItemIdentifier
@@ -38,6 +42,8 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
         self.isPinned = isPinned
         self.isDownloaded = isDownloaded
         self.isUploaded = isUploaded
+        self.contentVersionData = contentVersion?.data(using: .utf8)
+        self.metadataVersionData = metadataVersion?.data(using: .utf8)
 
         if isDirectory {
             self.contentType = .folder
@@ -68,7 +74,9 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
             contentModificationDate: entry.modificationDate,
             creationDate: entry.creationDate,
             isDownloaded: isDownloaded,
-            isUploaded: true
+            isUploaded: true,
+            contentVersion: entry.contentVersion,
+            metadataVersion: entry.metadataVersion
         )
     }
 
@@ -82,7 +90,9 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
             contentModificationDate: metadata.modificationDate,
             creationDate: metadata.creationDate,
             isDownloaded: isDownloaded,
-            isUploaded: !metadata.isDeleted
+            isUploaded: !metadata.isDeleted,
+            contentVersion: metadata.contentVersion,
+            metadataVersion: metadata.metadataVersion
         )
     }
 
@@ -96,7 +106,10 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
 
     public var itemVersion: NSFileProviderItemVersion {
         let mtime = contentModificationDate?.timeIntervalSince1970 ?? 0
-        let versionData = "\(mtime)".data(using: .utf8) ?? Data()
-        return NSFileProviderItemVersion(contentVersion: versionData, metadataVersion: versionData)
+        let fallback = "\(mtime)".data(using: .utf8) ?? Data()
+        return NSFileProviderItemVersion(
+            contentVersion: contentVersionData ?? fallback,
+            metadataVersion: metadataVersionData ?? fallback
+        )
     }
 }

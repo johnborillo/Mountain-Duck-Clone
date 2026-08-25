@@ -40,5 +40,18 @@ final class FileProviderItemTests: XCTestCase {
         XCTAssertTrue(item.capabilities.contains(.allowsAddingSubItems))
         XCTAssertTrue(item.capabilities.contains(.allowsContentEnumerating))
     }
-}
 
+    func testItemVersionCarriesRemoteFingerprint() {
+        let entry = RemoteFileEntry(
+            name: "notes.txt",
+            path: "/notes.txt",
+            itemType: .file,
+            size: 12,
+            modificationDate: Date(timeIntervalSince1970: 123),
+            etag: "etag-42"
+        )
+        let item = FileProviderItem(from: entry, parentIdentifier: .rootContainer)
+        XCTAssertEqual(String(data: item.itemVersion.contentVersion, encoding: .utf8), entry.contentVersion)
+        XCTAssertEqual(String(data: item.itemVersion.metadataVersion, encoding: .utf8), entry.metadataVersion)
+    }
+}

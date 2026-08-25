@@ -24,6 +24,9 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         self.connectionManager = ConnectionManager.shared
         self.metadataStore = .shared
         super.init()
+        self.cacheEngine.setOperationCompletionHandler { [weak self] operation in
+            self?.reconcileCompletedOperation(operation)
+        }
     }
 
     public func invalidate() {
@@ -227,6 +230,20 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 }
 
                 let adapter = try await self.adapterForDomain()
+                let currentRemote = try await adapter.stat(path: existing.remotePath)
+                let requestedContentVersion = String(data: baseVersion.contentVersion, encoding: .utf8)
+                if let requestedContentVersion, !requestedContentVersion.isEmpty, requestedContentVersion != currentRemote.contentVersion {
+                    let conflict = DomainConflict(
+                        domainIdentifier: self.domain.identifier.rawValue,
+                        itemIdentifier: item.itemIdentifier.rawValue,
+                        remotePath: existing.remotePath,
+                        localVersion: requestedContentVersion,
+                        remoteVersion: currentRemote.contentVersion
+                    )
+                    self.metadataStore.recordConflict(conflict)
+                    self.cacheEngine.journal.block(itemIdentifier: item.itemIdentifier.rawValue, remotePath: existing.remotePath)
+                    throw AdapterError.conflict(localVersion: requestedContentVersion, remoteVersion: currentRemote.contentVersion)
+                }
 
                 if let destinationPath {
                     try await adapter.move(from: existing.remotePath, to: destinationPath)
@@ -249,6 +266,13 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 }
 
                 let updatedEntry = try await adapter.stat(path: remotePath)
+                if newContents != nil {
+                    let attributes = try? FileManager.default.attributesOfItem(atPath: self.cacheEngine.fileURL(for: item.itemIdentifier.rawValue).path)
+                    let localSize = (attributes?[.size] as? Int64) ?? 0
+                    guard localSize == updatedEntry.size else {
+                        throw AdapterError.networkError("Remote upload size mismatch for '\(remotePath)': \(updatedEntry.size) != \(localSize).")
+                    }
+                }
                 let metadata = self.metadataStore.upsert(
                     domainIdentifier: self.domain.identifier.rawValue,
                     parentItemIdentifier: item.parentItemIdentifier.rawValue,
@@ -275,14 +299,33 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         let progress = Progress(totalUnitCount: 1)
 
         Task {
+            let journalEntry = JournalEntry(
+                action: .delete,
+                itemIdentifier: identifier.rawValue,
+                remotePath: self.resolveRemotePath(for: identifier)
+            )
             do {
-                let remotePath = self.resolveRemotePath(for: identifier)
-                self.cacheEngine.enqueue(JournalEntry(
-                    action: .delete,
-                    itemIdentifier: identifier.rawValue,
-                    remotePath: remotePath
-                ))
+                let remotePath = journalEntry.remotePath
+                // Persist first so an offline delete survives Finder callback
+                // teardown; if the server is reachable, protect against deleting
+                // a version changed by another client since Finder's base anchor.
+                self.cacheEngine.enqueue(journalEntry)
                 let adapter = try await self.adapterForDomain()
+                if let currentRemote = try? await adapter.stat(path: remotePath) {
+                    let requestedVersion = String(data: baseVersion.contentVersion, encoding: .utf8)
+                    if let requestedVersion, !requestedVersion.isEmpty, requestedVersion != currentRemote.contentVersion {
+                        self.cacheEngine.journal.remove(id: journalEntry.id)
+                        let conflict = DomainConflict(
+                            domainIdentifier: self.domain.identifier.rawValue,
+                            itemIdentifier: identifier.rawValue,
+                            remotePath: remotePath,
+                            localVersion: requestedVersion,
+                            remoteVersion: currentRemote.contentVersion
+                        )
+                        self.metadataStore.recordConflict(conflict)
+                        throw AdapterError.conflict(localVersion: requestedVersion, remoteVersion: currentRemote.contentVersion)
+                    }
+                }
                 do {
                     try await adapter.delete(remotePath: remotePath)
                 } catch let error {
@@ -339,8 +382,37 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
         try await connectionManager.connect(to: try profileIdentifier())
     }
 
+    private func reconcileCompletedOperation(_ operation: JournalEntry) {
+        switch operation.action {
+        case .move:
+            guard let destination = operation.destinationRemotePath else { break }
+            let parentPath = (destination as NSString).deletingLastPathComponent
+            let parentIdentifier = metadataStore.item(forRemotePath: parentPath, domainIdentifier: domain.identifier.rawValue)?.itemIdentifier
+                ?? NSFileProviderItemIdentifier.rootContainer.rawValue
+            let filename = (destination as NSString).lastPathComponent
+            _ = metadataStore.move(
+                domainIdentifier: domain.identifier.rawValue,
+                itemIdentifier: operation.itemIdentifier,
+                parentItemIdentifier: parentIdentifier,
+                filename: filename,
+                remotePath: destination
+            )
+        case .delete:
+            metadataStore.markDeleted(domainIdentifier: domain.identifier.rawValue, itemIdentifier: operation.itemIdentifier)
+        case .upload, .createDirectory:
+            break
+        }
+
+        // Wake Finder immediately after an offline operation is replayed. The
+        // next enumeration will stat/reconcile uploads and newly-created folders.
+        if let profile = connectionManager.profile(for: (try? profileIdentifier()) ?? UUID()) {
+            Task { try? await FileProviderDomainCoordinator.signalWorkingSet(profile: profile) }
+        }
+    }
+
     private func resolveRemotePath(for identifier: NSFileProviderItemIdentifier) -> String {
         if identifier == .rootContainer { return rootRemotePath() }
+        if identifier == .workingSet { return rootRemotePath() }
         if let metadata = metadataStore.item(for: identifier.rawValue, domainIdentifier: domain.identifier.rawValue), !metadata.isDeleted {
             return metadata.remotePath
         }
@@ -355,13 +427,6 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     }
 
     private func appendPath(_ parent: String, _ child: String) -> String {
-        let cleanParent = parent.isEmpty ? "/" : parent
-        if cleanParent == "/" { return "/" + child.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
-        return cleanParent.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            .split(separator: "/", omittingEmptySubsequences: true)
-            .reduce(into: "/") { result, component in
-                if result != "/" { result += "/" }
-                result += component
-            } + "/" + child.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        RemotePath.normalize(RemotePath.join(parent, child))
     }
 }

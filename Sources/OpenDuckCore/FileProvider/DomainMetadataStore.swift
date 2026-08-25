@@ -62,6 +62,30 @@ public struct DomainMetadataChange: Sendable, Equatable {
     }
 }
 
+public struct DomainConflict: Sendable, Equatable, Identifiable {
+    public enum Resolution: String, Sendable { case pending, keepLocal, keepRemote, keepBoth }
+
+    public let id: String
+    public let domainIdentifier: String
+    public let itemIdentifier: String
+    public let remotePath: String
+    public let localVersion: String
+    public let remoteVersion: String
+    public let createdAt: Date
+    public var resolution: Resolution
+
+    public init(id: String = UUID().uuidString, domainIdentifier: String, itemIdentifier: String, remotePath: String, localVersion: String, remoteVersion: String, createdAt: Date = Date(), resolution: Resolution = .pending) {
+        self.id = id
+        self.domainIdentifier = domainIdentifier
+        self.itemIdentifier = itemIdentifier
+        self.remotePath = remotePath
+        self.localVersion = localVersion
+        self.remoteVersion = remoteVersion
+        self.createdAt = createdAt
+        self.resolution = resolution
+    }
+}
+
 /// SQLite-backed metadata for one or more File Provider domains.
 ///
 /// The store is intentionally independent of the legacy volume metadata database. Native
@@ -127,8 +151,8 @@ public final class DomainMetadataStore: @unchecked Sendable {
             bindings: [domainIdentifier, path, requestedIdentifier ?? ""]
         )
         let id = existing?.itemIdentifier ?? requestedIdentifier ?? UUID().uuidString
-        let contentVersion = entry.etag ?? "\(entry.modificationDate.timeIntervalSince1970):\(entry.size)"
-        let metadataVersion = "\(entry.name)|\(parentItemIdentifier)|\(entry.modificationDate.timeIntervalSince1970)"
+        let contentVersion = entry.contentVersion
+        let metadataVersion = "\(parentItemIdentifier)|\(entry.metadataVersion)"
         let record = DomainMetadataItem(
             itemIdentifier: id,
             parentItemIdentifier: parentItemIdentifier,
@@ -220,6 +244,40 @@ public final class DomainMetadataStore: @unchecked Sendable {
 
     public func sequence(from anchor: Data) -> Int64 { Int64(String(data: anchor, encoding: .utf8) ?? "0") ?? 0 }
 
+    public func recordConflict(_ conflict: DomainConflict) {
+        lock.lock(); defer { lock.unlock() }
+        // Keep one actionable conflict per item. Repeated Finder retries should
+        // update the incident rather than grow an unbounded list of identical
+        // pending rows while preserving the older row as acknowledged history.
+        executeUnlocked("UPDATE domain_conflicts SET resolution = 'keepBoth' WHERE domain_id = ? AND item_id = ? AND resolution = 'pending';", bindings: [conflict.domainIdentifier, conflict.itemIdentifier])
+        executeUnlocked("""
+            INSERT OR REPLACE INTO domain_conflicts (conflict_id, domain_id, item_id, remote_path, local_version, remote_version, created_at, resolution)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            """, bindings: [conflict.id, conflict.domainIdentifier, conflict.itemIdentifier, conflict.remotePath, conflict.localVersion, conflict.remoteVersion, conflict.createdAt.timeIntervalSince1970, conflict.resolution.rawValue])
+    }
+
+    public func conflicts(domainIdentifier: String, includeResolved: Bool = false) -> [DomainConflict] {
+        lock.lock(); defer { lock.unlock() }
+        let sql = includeResolved
+            ? "SELECT conflict_id, domain_id, item_id, remote_path, local_version, remote_version, created_at, resolution FROM domain_conflicts WHERE domain_id = ? ORDER BY created_at DESC;"
+            : "SELECT conflict_id, domain_id, item_id, remote_path, local_version, remote_version, created_at, resolution FROM domain_conflicts WHERE domain_id = ? AND resolution = 'pending' ORDER BY created_at DESC;"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
+        bind(statement, 1, domainIdentifier)
+        defer { sqlite3_finalize(statement) }
+        var output: [DomainConflict] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let id = sqlite3_column_text(statement, 0), let domain = sqlite3_column_text(statement, 1), let item = sqlite3_column_text(statement, 2), let path = sqlite3_column_text(statement, 3), let local = sqlite3_column_text(statement, 4), let remote = sqlite3_column_text(statement, 5), let resolutionRaw = sqlite3_column_text(statement, 7), let resolution = DomainConflict.Resolution(rawValue: String(cString: resolutionRaw)) else { continue }
+            output.append(DomainConflict(id: String(cString: id), domainIdentifier: String(cString: domain), itemIdentifier: String(cString: item), remotePath: String(cString: path), localVersion: String(cString: local), remoteVersion: String(cString: remote), createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 6)), resolution: resolution))
+        }
+        return output
+    }
+
+    public func resolveConflict(id: String, resolution: DomainConflict.Resolution) {
+        lock.lock(); defer { lock.unlock() }
+        executeUnlocked("UPDATE domain_conflicts SET resolution = ? WHERE conflict_id = ?;", bindings: [resolution.rawValue, id])
+    }
+
     // MARK: - SQLite plumbing
 
     private func openDatabase() {
@@ -244,6 +302,12 @@ public final class DomainMetadataStore: @unchecked Sendable {
               item_id TEXT NOT NULL, kind TEXT NOT NULL, created_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_domain_changes_domain ON domain_changes(domain_id, sequence);
+            CREATE TABLE IF NOT EXISTS domain_conflicts (
+              conflict_id TEXT PRIMARY KEY, domain_id TEXT NOT NULL, item_id TEXT NOT NULL,
+              remote_path TEXT NOT NULL, local_version TEXT NOT NULL, remote_version TEXT NOT NULL,
+              created_at REAL NOT NULL, resolution TEXT NOT NULL DEFAULT 'pending'
+            );
+            CREATE INDEX IF NOT EXISTS idx_domain_conflicts_domain ON domain_conflicts(domain_id, resolution);
             """, nil, nil, nil)
     }
 

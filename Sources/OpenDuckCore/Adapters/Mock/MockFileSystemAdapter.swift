@@ -13,6 +13,9 @@ public final class MockFileSystemAdapter: RemoteFilesystemAdapter, @unchecked Se
     public let endpointDescription: String
     public var simulatedLatencyMs: UInt32 = 0
     public var simulatedError: AdapterError?
+    /// Fault-injection hook used by tests to mutate the remote between a stat
+    /// and the completion of a download.
+    public var onDownload: (() -> Void)?
 
     public init(endpointDescription: String = "mock://local.test") {
         self.endpointDescription = endpointDescription
@@ -130,6 +133,8 @@ public final class MockFileSystemAdapter: RemoteFilesystemAdapter, @unchecked Se
         }
 
         try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let downloadHook = sync { onDownload }
+        downloadHook?()
         progress?.totalUnitCount = Int64(data.count)
         progress?.completedUnitCount = 0
         try data.write(to: localURL, options: .atomic)

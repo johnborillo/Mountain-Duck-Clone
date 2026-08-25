@@ -90,7 +90,7 @@ public struct MenuBarView: View {
             }
 
             // Active & Recent Transfers Section
-            if !viewModel.activeTransfers.isEmpty || !viewModel.recentTransfers.isEmpty {
+            if !viewModel.activeTransfers.isEmpty || !viewModel.recentTransfers.isEmpty || !viewModel.pendingOperations.isEmpty || !viewModel.conflicts.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("TRANSFERS")
@@ -114,6 +114,42 @@ public struct MenuBarView: View {
 
                     ForEach(viewModel.recentTransfers.prefix(2)) { transfer in
                         recentTransferRow(for: transfer)
+                    }
+
+                    if !viewModel.pendingOperations.isEmpty || !viewModel.conflicts.isEmpty {
+                        HStack(spacing: 8) {
+                            Image(systemName: viewModel.conflicts.isEmpty ? "clock.badge.exclamationmark" : "exclamationmark.triangle.fill")
+                                .foregroundColor(viewModel.conflicts.isEmpty ? .orange : .red)
+                            Text("\(viewModel.pendingOperations.count) queued • \(viewModel.conflicts.count) conflicts")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button("Refresh") { viewModel.refreshOperationalState() }
+                                .buttonStyle(.borderless)
+                                .font(.caption2)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 4)
+                    }
+
+                    ForEach(viewModel.conflicts.prefix(2)) { conflict in
+                        HStack(spacing: 6) {
+                            Text(conflict.remotePath)
+                                .font(.system(size: 10, design: .monospaced))
+                                .lineLimit(1)
+                            Spacer()
+                            Button("Local") {
+                                viewModel.resolveConflict(conflict, resolution: .keepLocal)
+                            }
+                            .buttonStyle(.borderless)
+                            .font(.caption2)
+                            Button("Remote") {
+                                viewModel.resolveConflict(conflict, resolution: .keepRemote)
+                            }
+                            .buttonStyle(.borderless)
+                            .font(.caption2)
+                        }
+                        .padding(.horizontal, 16)
                     }
                 }
                 .padding(.bottom, 6)
@@ -211,7 +247,7 @@ public struct MenuBarView: View {
                 Button(action: {
                     viewModel.toggleMount(for: profile)
                 }) {
-                    Text(isMounted ? "Unmount" : "Mount")
+                    Text(isMounted ? "Unmount Legacy" : "Legacy Mirror")
                         .font(.caption).bold()
                 }
                 .buttonStyle(.bordered)
@@ -229,7 +265,7 @@ public struct MenuBarView: View {
                 }
                 .buttonStyle(.borderless)
 
-                if isMounted {
+                if isFinderRegistered {
                     Button(action: {
                         viewModel.openInFinder(for: profile)
                     }) {
@@ -237,7 +273,9 @@ public struct MenuBarView: View {
                             .font(.caption)
                     }
                     .buttonStyle(.borderless)
+                }
 
+                if isMounted {
                     Button(action: {
                         Task { await viewModel.syncVolume(profile: profile) }
                     }) {

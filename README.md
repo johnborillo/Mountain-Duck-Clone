@@ -10,12 +10,17 @@
 
 ## 🛡️ Architecture & Security
 
-OpenDuck mounts remote endpoints into macOS Finder using an in-process, high-performance architecture:
+OpenDuck presents remote endpoints in Finder using the native File Provider path first. The older sparse-image mirror remains available as an explicitly labeled compatibility mode while the native domain matures:
 
-- 🖥️ **Native APFS Sparse Virtual Disks:** High-speed `/Volumes/<ProfileName>` virtual volume mounted into macOS Finder's Locations sidebar with real sparse placeholder sizing and opt-in write access.
+- 🗂️ **Native File Provider domains:** Each profile has a stable UUID-backed domain under Finder's Cloud Storage locations. Finder owns placeholders, materialization, and eviction; OpenDuck owns remote state and mutations.
+- 🖥️ **Legacy Preview / Mirror:** The APFS sparse-image path is retained for compatibility and diagnostics, but is no longer the default connection flow and is clearly labeled in the menu bar.
 - 🚀 **Native Citadel SFTP Engine:** In-process, SwiftNIO SSH multiplexed transport. Zero subprocess shell-outs, zero batch-script injection risk, and full support for encrypted Ed25519/RSA SSH private keys and passwords.
 - 🔑 **Trust-On-First-Use (TOFU) Key Pinning:** Strict SHA-256 host key fingerprints stored in an isolated database and validated on every connection against OpenSSH `ssh-keygen -lf` standard format to prevent Man-In-The-Middle (MITM) attacks.
 - 🗄️ **Persistent SQLite WAL Engine:** Transactional metadata database (`MetadataDatabase.sqlite`) tracking placeholder, materialized, dirty, and uploading states across restarts and crashes.
+- 🧭 **Root confinement and stable versions:** Remote paths are canonicalized and rejected when they escape the configured root. File Provider versions use remote fingerprints so stale Finder edits become visible conflicts instead of silent overwrites.
+- ✅ **Verified transfer pipeline:** Downloads land in unique staging files, verify the remote version and byte count, then become visible atomically. Uploads use unique remote staging names and atomic replacement.
+- 🔄 **Adaptive remote refresh:** Low-frequency working-set signals trigger SFTP scans and durable change-log enumeration so edits made from another client converge in Finder.
+- 🧰 **Recovery and diagnostics:** Pending operations, conflicts, retry state, and a redacted JSON diagnostics export are visible from the menu-bar app.
 - 🛡️ **6-Layer Anti-Corruption Shield:**
   1. *Extended Attributes (`com.openduck.placeholder`)* for native macOS Finder integration.
   2. *POSIX Read-Only Locking (`0o555`)* causing Finder to enforce write-locks natively on read-only mounts.
@@ -37,44 +42,25 @@ OpenDuck mounts remote endpoints into macOS Finder using an in-process, high-per
 ### 1. Build and Run Diagnostics
 
 ```bash
-# Run the complete Swift Testing suite
-swift test
+# Build all products
+swift build
 
-# Run the 56-assertion CLI automated diagnostic suite
+# Run the complete deterministic Swift suite
+.build/arm64-apple-macosx/debug/OpenDuckTests
+
+# Run the CLI integration/diagnostic suite
 swift run openduck test
 ```
 
 ### 2. Build & Install the Menu Bar App
 
-To compile and assemble the application into `/Applications`:
+To compile, assemble, sign ad hoc, and install the app plus File Provider extension into `/Applications`:
 
 ```bash
-swift build -c release
-mkdir -p /Applications/OpenDuck.app/Contents/MacOS /Applications/OpenDuck.app/Contents/Resources
-cp .build/release/OpenDuckApp /Applications/OpenDuck.app/Contents/MacOS/OpenDuck
-chmod +x /Applications/OpenDuck.app/Contents/MacOS/OpenDuck
-
-cat << 'EOF' > /Applications/OpenDuck.app/Contents/Info.plist
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>OpenDuck</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.openduck.app</string>
-    <key>CFBundleName</key>
-    <string>OpenDuck</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
-    <key>LSUIElement</key>
-    <true/>
-</dict>
-</plist>
-EOF
+./scripts/build_app.sh
 ```
+
+The current distribution script is intentionally development-oriented (ad-hoc signing and a generated bundle). A notarized release still needs a canonical Xcode project, team signing, App Groups, and production entitlements.
 
 ---
 

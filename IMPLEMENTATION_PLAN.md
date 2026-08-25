@@ -6,6 +6,19 @@ OpenDuck should become a native macOS SFTP File Provider whose files appear in F
 
 The existing sparse APFS image and FSEvents implementation should not remain the primary writable mount. It cannot intercept reads before an application accesses a placeholder, and it must infer user intent from ambiguous filesystem events. Keep it temporarily as an explicitly labeled **Legacy Preview / Read-Only Mirror** while the File Provider path reaches feature parity, then remove it from the normal product flow.
 
+## Current delivery status
+
+The consolidated final-overhaul PR implements the highest-risk correctness and usability slice of this plan:
+
+- Native File Provider registration is the default profile flow; the sparse-image path is explicitly labeled as a legacy mirror.
+- SFTP paths are canonicalized and confined to the configured root.
+- File Provider items carry durable content/metadata versions, and stale writes/deletes are recorded as conflicts.
+- Downloads use unique staging files with version and byte-count verification before materialization.
+- Native working-set signals trigger remote scans and durable change-log enumeration, including offline-journal protection.
+- Pending operations and unresolved conflicts are visible in the host UI, with Keep Local/Keep Remote controls and redacted diagnostics export.
+
+The remaining release work is primarily packaging and environment qualification: a canonical signed Xcode project/extension target, App Group entitlements, real Finder integration testing against OpenSSH, and long-running fault-injection tests on multiple macOS versions.
+
 ### Initial product scope
 
 Ship one backend well before adding more:
