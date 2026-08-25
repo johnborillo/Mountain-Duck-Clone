@@ -7,6 +7,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     public let domain: NSFileProviderDomain
     public let cacheEngine: CacheEngine
     public let connectionManager: ConnectionManager
+    public let metadataStore: DomainMetadataStore
 
     /// Bounds the number of concurrent file uploads to prevent SSH channel exhaustion.
     /// Without this, Finder can trigger 97+ simultaneous upload Tasks, each spawning
@@ -21,6 +22,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             journalURL: OpenDuckSharedStorage.uploadJournalURL(forDomain: domainID)
         )
         self.connectionManager = ConnectionManager.shared
+        self.metadataStore = .shared
         super.init()
     }
 
@@ -47,7 +49,13 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 let adapter = try await self.adapterForDomain()
 
                 let entry = try await adapter.stat(path: remotePath)
-                let item = FileProviderItem(from: entry, parentIdentifier: .rootContainer)
+                let metadata = self.metadataStore.upsert(
+                    domainIdentifier: self.domain.identifier.rawValue,
+                    parentItemIdentifier: self.metadataStore.item(for: identifier.rawValue, domainIdentifier: self.domain.identifier.rawValue)?.parentItemIdentifier ?? NSFileProviderItemIdentifier.rootContainer.rawValue,
+                    entry: entry,
+                    itemIdentifier: identifier.rawValue
+                )
+                let item = FileProviderItem(from: metadata)
                 completionHandler(item, nil)
             } catch {
                 completionHandler(nil, error)
@@ -77,7 +85,13 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 )
 
                 let entry = try await adapter.stat(path: remotePath)
-                let item = FileProviderItem(from: entry, parentIdentifier: .rootContainer, isDownloaded: true)
+                let metadata = self.metadataStore.upsert(
+                    domainIdentifier: self.domain.identifier.rawValue,
+                    parentItemIdentifier: self.metadataStore.item(for: itemIdentifier.rawValue, domainIdentifier: self.domain.identifier.rawValue)?.parentItemIdentifier ?? NSFileProviderItemIdentifier.rootContainer.rawValue,
+                    entry: entry,
+                    itemIdentifier: itemIdentifier.rawValue
+                )
+                let item = FileProviderItem(from: metadata, isDownloaded: true)
                 completionHandler(localURL, item, nil)
             } catch {
                 completionHandler(nil, nil, error)
@@ -102,7 +116,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 let adapter = try await self.adapterForDomain()
 
                 let isDir = itemTemplate.contentType == .folder
-                let remotePath = self.resolveRemotePath(for: itemTemplate.parentItemIdentifier) + "/" + itemTemplate.filename
+                let remotePath = self.appendPath(self.resolveRemotePath(for: itemTemplate.parentItemIdentifier), itemTemplate.filename)
 
                 if isDir {
                     try await adapter.createDirectory(path: remotePath)
@@ -112,15 +126,13 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     try await adapter.upload(from: localURL, to: remotePath, progress: progress)
                 }
 
-                let entry = RemoteFileEntry(
-                    name: itemTemplate.filename,
-                    path: remotePath,
-                    itemType: isDir ? .directory : .file,
-                    size: (itemTemplate.documentSize??.int64Value) ?? 0,
-                    modificationDate: Date()
+                let entry = try await adapter.stat(path: remotePath)
+                let metadata = self.metadataStore.upsert(
+                    domainIdentifier: self.domain.identifier.rawValue,
+                    parentItemIdentifier: itemTemplate.parentItemIdentifier.rawValue,
+                    entry: entry
                 )
-
-                let newItem = FileProviderItem(from: entry, parentIdentifier: itemTemplate.parentItemIdentifier, isDownloaded: true)
+                let newItem = FileProviderItem(from: metadata, isDownloaded: isDir || url != nil)
                 completionHandler(newItem, fields, false, nil)
             } catch {
                 completionHandler(nil, [], false, error)
@@ -145,7 +157,27 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
             do {
                 let adapter = try await self.adapterForDomain()
 
-                let remotePath = self.resolveRemotePath(for: item.itemIdentifier)
+                guard let existing = self.metadataStore.item(for: item.itemIdentifier.rawValue, domainIdentifier: self.domain.identifier.rawValue) else {
+                    throw AdapterError.fileNotFound(item.itemIdentifier.rawValue)
+                }
+                var remotePath = existing.remotePath
+
+                if changedFields.contains(.filename) || changedFields.contains(.parentItemIdentifier) {
+                    let destinationParent = self.resolveRemotePath(for: item.parentItemIdentifier)
+                    let destinationPath = self.appendPath(destinationParent, item.filename)
+                    if let conflicting = self.metadataStore.item(forRemotePath: destinationPath, domainIdentifier: self.domain.identifier.rawValue), conflicting.itemIdentifier != item.itemIdentifier.rawValue, !conflicting.isDeleted {
+                        throw AdapterError.alreadyExists(destinationPath)
+                    }
+                    try await adapter.move(from: existing.remotePath, to: destinationPath)
+                    _ = self.metadataStore.move(
+                        domainIdentifier: self.domain.identifier.rawValue,
+                        itemIdentifier: item.itemIdentifier.rawValue,
+                        parentItemIdentifier: item.parentItemIdentifier.rawValue,
+                        filename: item.filename,
+                        remotePath: destinationPath
+                    )
+                    remotePath = destinationPath
+                }
 
                 if let fileURL = newContents {
                     self.cacheEngine.markDirty(itemIdentifier: item.itemIdentifier.rawValue, newLocalURL: fileURL)
@@ -155,7 +187,13 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 }
 
                 let updatedEntry = try await adapter.stat(path: remotePath)
-                let updatedItem = FileProviderItem(from: updatedEntry, parentIdentifier: item.parentItemIdentifier, isDownloaded: true)
+                let metadata = self.metadataStore.upsert(
+                    domainIdentifier: self.domain.identifier.rawValue,
+                    parentItemIdentifier: item.parentItemIdentifier.rawValue,
+                    entry: updatedEntry,
+                    itemIdentifier: item.itemIdentifier.rawValue
+                )
+                let updatedItem = FileProviderItem(from: metadata, isDownloaded: true)
                 completionHandler(updatedItem, [], false, nil)
             } catch {
                 completionHandler(nil, [], false, error)
@@ -181,6 +219,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 let remotePath = self.resolveRemotePath(for: identifier)
                 try await adapter.delete(remotePath: remotePath)
                 try? self.cacheEngine.evict(itemIdentifier: identifier.rawValue)
+                self.metadataStore.markDeleted(domainIdentifier: self.domain.identifier.rawValue, itemIdentifier: identifier.rawValue)
                 completionHandler(nil)
             } catch {
                 completionHandler(error)
@@ -193,14 +232,16 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     public func enumerator(for containerItemIdentifier: NSFileProviderItemIdentifier, request: NSFileProviderRequest) throws -> NSFileProviderEnumerator {
         let profileID = try profileIdentifier()
 
-        let remotePath = containerItemIdentifier == .rootContainer ? "/" : resolveRemotePath(for: containerItemIdentifier)
+        let remotePath = resolveRemotePath(for: containerItemIdentifier)
 
         return FileProviderEnumerator(
             containerItemIdentifier: containerItemIdentifier,
             remotePath: remotePath,
             profileID: profileID,
             connectionManager: connectionManager,
-            cacheEngine: cacheEngine
+            cacheEngine: cacheEngine,
+            metadataStore: metadataStore,
+            domainIdentifier: domain.identifier.rawValue
         )
     }
 
@@ -216,10 +257,28 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     }
 
     private func resolveRemotePath(for identifier: NSFileProviderItemIdentifier) -> String {
-        if identifier == .rootContainer { return "/" }
+        if identifier == .rootContainer { return rootRemotePath() }
+        if let metadata = metadataStore.item(for: identifier.rawValue, domainIdentifier: domain.identifier.rawValue), !metadata.isDeleted {
+            return metadata.remotePath
+        }
         if let data = Data(base64Encoded: identifier.rawValue), let path = String(data: data, encoding: .utf8) {
             return path
         }
-        return "/" + identifier.rawValue
+        return appendPath(rootRemotePath(), identifier.rawValue)
+    }
+
+    private func rootRemotePath() -> String {
+        connectionManager.profile(for: (try? profileIdentifier()) ?? UUID())?.remoteRootPath ?? "/"
+    }
+
+    private func appendPath(_ parent: String, _ child: String) -> String {
+        let cleanParent = parent.isEmpty ? "/" : parent
+        if cleanParent == "/" { return "/" + child.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+        return cleanParent.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .reduce(into: "/") { result, component in
+                if result != "/" { result += "/" }
+                result += component
+            } + "/" + child.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 }

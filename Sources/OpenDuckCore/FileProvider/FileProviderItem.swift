@@ -72,9 +72,23 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
         )
     }
 
+    public convenience init(from metadata: DomainMetadataItem, isDownloaded: Bool = false) {
+        self.init(
+            itemIdentifier: NSFileProviderItemIdentifier(metadata.itemIdentifier),
+            parentItemIdentifier: NSFileProviderItemIdentifier(metadata.parentItemIdentifier),
+            filename: metadata.filename,
+            isDirectory: metadata.isDirectory,
+            documentSize: metadata.size,
+            contentModificationDate: metadata.modificationDate,
+            creationDate: metadata.creationDate,
+            isDownloaded: isDownloaded,
+            isUploaded: !metadata.isDeleted
+        )
+    }
+
     public var capabilities: NSFileProviderItemCapabilities {
         if isDirectory {
-            return [.allowsReading, .allowsAddingSubItems, .allowsContentEnumerating, .allowsDeleting, .allowsRenaming]
+            return [.allowsReading, .allowsAddingSubItems, .allowsContentEnumerating, .allowsDeleting, .allowsRenaming, .allowsReparenting]
         } else {
             return [.allowsReading, .allowsWriting, .allowsRenaming, .allowsDeleting, .allowsReparenting]
         }

@@ -177,6 +177,7 @@ public struct MenuBarView: View {
     @ViewBuilder
     private func connectionCard(for profile: ServerProfile) -> some View {
         let isMounted = viewModel.mountedDomainIDs.contains(profile.id)
+        let isFinderRegistered = viewModel.registeredDomainIDs.contains(profile.id)
 
         VStack(alignment: .leading, spacing: 6) {
             HStack {
@@ -220,6 +221,14 @@ public struct MenuBarView: View {
 
             // Secondary Action Row (Available in both mounted & unmounted states)
             HStack(spacing: 12) {
+                Button(action: {
+                    viewModel.toggleFinderDomain(for: profile)
+                }) {
+                    Label(isFinderRegistered ? "Remove from Finder" : "Add to Finder", systemImage: isFinderRegistered ? "sidebar.left" : "finder")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+
                 if isMounted {
                     Button(action: {
                         viewModel.openInFinder(for: profile)

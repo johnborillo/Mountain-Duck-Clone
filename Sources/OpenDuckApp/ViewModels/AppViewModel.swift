@@ -18,6 +18,7 @@ public final class AppViewModel: ObservableObject {
     @Published public var profiles: [ServerProfile] = []
     @Published public var editingProfile: ServerProfile? = nil
     @Published public var mountedDomainIDs: Set<UUID> = []
+    @Published public var registeredDomainIDs: Set<UUID> = []
     @Published public var cacheStats: CacheStatistics = .empty
     @Published public var statusMessage: String? = nil
     @Published public var isMounting: Bool = false
@@ -53,6 +54,7 @@ public final class AppViewModel: ObservableObject {
         loadProfiles()
         refreshCacheStats()
         refreshMountedVolumes()
+        refreshRegisteredDomains()
     }
 
     public func loadProfiles() {
@@ -80,6 +82,9 @@ public final class AppViewModel: ObservableObject {
                     await unmount(profile: profile)
                 }
             }
+            if registeredDomainIDs.contains(id), let profile = profiles.first(where: { $0.id == id }) {
+                guard await unregisterFinderDomain(for: profile) else { return }
+            }
             connectionManager.deleteProfile(id: id)
             statusMessage = "✓ Connection profile deleted."
             loadProfiles()
@@ -93,6 +98,42 @@ public final class AppViewModel: ObservableObject {
             } else {
                 await mount(profile: profile)
             }
+        }
+    }
+
+    public func toggleFinderDomain(for profile: ServerProfile) {
+        Task {
+            if registeredDomainIDs.contains(profile.id) {
+                await unregisterFinderDomain(for: profile)
+            } else {
+                await registerFinderDomain(for: profile)
+            }
+        }
+    }
+
+    @discardableResult
+    public func registerFinderDomain(for profile: ServerProfile) async -> Bool {
+        do {
+            try await FileProviderDomainCoordinator.register(profile: profile)
+            registeredDomainIDs.insert(profile.id)
+            statusMessage = "✓ Added '\(profile.name)' to Finder."
+            return true
+        } catch {
+            statusMessage = "❌ Finder registration failed: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    @discardableResult
+    public func unregisterFinderDomain(for profile: ServerProfile) async -> Bool {
+        do {
+            try await FileProviderDomainCoordinator.unregister(profile: profile)
+            registeredDomainIDs.remove(profile.id)
+            statusMessage = "Removed '\(profile.name)' from Finder."
+            return true
+        } catch {
+            statusMessage = "❌ Finder removal failed: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -231,6 +272,14 @@ public final class AppViewModel: ObservableObject {
         self.mountedDomainIDs = mounted
     }
 
+    private func refreshRegisteredDomains() {
+        Task {
+            guard let domains = try? await FileProviderDomainCoordinator.registeredDomains() else { return }
+            let ids = domains.compactMap { UUID(uuidString: $0.identifier.rawValue) }
+            await MainActor.run { self.registeredDomainIDs = Set(ids) }
+        }
+    }
+
     private func startPeriodicRefresh() {
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -273,11 +322,15 @@ public final class AppViewModel: ObservableObject {
     }
 
     public func updateProfile(_ profile: ServerProfile, secret: String?) {
+        let wasRegistered = registeredDomainIDs.contains(profile.id)
         connectionManager.updateProfile(profile, secret: secret)
         loadProfiles()
         self.editingProfile = nil
         self.currentScreen = .main
         statusMessage = "✓ Profile '\(profile.name)' updated."
+        if wasRegistered {
+            Task { await registerFinderDomain(for: profile) }
+        }
     }
 
     public func cancelTransfer(_ transfer: TransferProgress, deleteItem: Bool = false) {

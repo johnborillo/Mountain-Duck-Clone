@@ -70,8 +70,13 @@ public final class CacheEngine: @unchecked Sendable {
 
     /// Register or update a remote item's metadata placeholder.
     public func registerPlaceholder(for entry: RemoteFileEntry) -> CacheEntry {
+        registerPlaceholder(for: entry, itemIdentifier: makeIdentifier(for: entry.path))
+    }
+
+    /// Register a placeholder using a caller-owned identity (used by native File Provider).
+    public func registerPlaceholder(for entry: RemoteFileEntry, itemIdentifier: String) -> CacheEntry {
         sync {
-            let identifier = makeIdentifier(for: entry.path)
+            let identifier = itemIdentifier
             pathToIdentifier[entry.path] = identifier
 
             if var existing = index[identifier] {
