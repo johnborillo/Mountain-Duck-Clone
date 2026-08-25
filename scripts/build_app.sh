@@ -90,11 +90,9 @@ cat << 'PLIST' > "$APPEX_BUNDLE/Contents/Info.plist"
     <string>13.0</string>
     <key>NSExtension</key>
     <dict>
-        <key>NSExtensionAttributes</key>
-        <dict>
-            <key>NSExtensionFileProviderDocumentGroup</key>
-            <string>group.com.openduck</string>
-        </dict>
+        <!-- fileproviderd reads this key directly from NSExtension. -->
+        <key>NSExtensionFileProviderDocumentGroup</key>
+        <string>group.com.openduck</string>
         <key>NSExtensionPointIdentifier</key>
         <string>com.apple.fileprovider-nonui</string>
         <key>NSExtensionPrincipalClass</key>
