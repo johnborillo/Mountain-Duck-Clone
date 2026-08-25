@@ -50,6 +50,14 @@ func runAllTests() async throws {
     await runTest("FileProviderItemTests.testItemCreationFromEntry") { fpItemTests.testItemCreationFromEntry() }
     await runTest("FileProviderItemTests.testDirectoryItemCapabilities") { fpItemTests.testDirectoryItemCapabilities() }
 
+    // DomainMetadataStoreTests
+    let domainMetadataTests = DomainMetadataStoreTests()
+    try domainMetadataTests.setUpWithError()
+    await runTest("DomainMetadataStoreTests.testIdentitySurvivesMetadataRefresh") { domainMetadataTests.testIdentitySurvivesMetadataRefresh() }
+    await runTest("DomainMetadataStoreTests.testRenamePreservesIdentityAndEmitsChange") { domainMetadataTests.testRenamePreservesIdentityAndEmitsChange() }
+    await runTest("DomainMetadataStoreTests.testDeleteIsARecoverableTombstone") { domainMetadataTests.testDeleteIsARecoverableTombstone() }
+    try domainMetadataTests.tearDownWithError()
+
     // ConnectionManagerTests
     let connTests = ConnectionManagerTests()
     await runTest("ConnectionManagerTests.testProfileRegistrationAndRetrieval") { connTests.testProfileRegistrationAndRetrieval() }

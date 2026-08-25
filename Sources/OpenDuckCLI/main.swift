@@ -1046,12 +1046,12 @@ struct OpenDuckCLI {
     }
 
     static func mountDomain(name: String) async {
-        let domain = NSFileProviderDomain(
-            identifier: NSFileProviderDomainIdentifier(name),
-            displayName: name
-        )
+        guard let profile = ConnectionManager.shared.allProfiles().first(where: { $0.name == name || $0.id.uuidString == name }) else {
+            print("❌ No connection profile named '\(name)'. Run 'openduck profiles' first.")
+            return
+        }
         do {
-            try await NSFileProviderManager.add(domain)
+            try await FileProviderDomainCoordinator.register(profile: profile)
             print("✓ Successfully mounted '\(name)' domain into Finder.")
         } catch {
             print("Note: Domain registration returned: \(error.localizedDescription)")
@@ -1060,12 +1060,12 @@ struct OpenDuckCLI {
     }
 
     static func unmountDomain(name: String) async {
-        let domain = NSFileProviderDomain(
-            identifier: NSFileProviderDomainIdentifier(name),
-            displayName: name
-        )
+        guard let profile = ConnectionManager.shared.allProfiles().first(where: { $0.name == name || $0.id.uuidString == name }) else {
+            print("❌ No connection profile named '\(name)'. Run 'openduck profiles' first.")
+            return
+        }
         do {
-            try await NSFileProviderManager.remove(domain)
+            try await FileProviderDomainCoordinator.unregister(profile: profile)
             print("✓ Successfully unmounted '\(name)' domain from Finder.")
         } catch {
             print("Note: Domain unregistration returned: \(error.localizedDescription)")
