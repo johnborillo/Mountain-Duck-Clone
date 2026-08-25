@@ -65,14 +65,30 @@ public final class UploadJournal: @unchecked Sendable {
     /// that later uploads stale content over the newest version.
     public func replacePendingUpload(with entry: JournalEntry) {
         precondition(entry.action == .upload)
+        replacePendingOperation(with: entry)
+    }
+
+    /// Replace an operation for the same item/path instead of allowing duplicate
+    /// replay intents to accumulate after repeated Finder events.
+    public func replacePendingOperation(with entry: JournalEntry) {
         lock.lock()
         defer {
             saveToDisk()
             lock.unlock()
         }
         entries = entries.filter { _, existing in
-            !(existing.action == .upload &&
-              (existing.itemIdentifier == entry.itemIdentifier || existing.remotePath == entry.remotePath))
+            guard existing.itemIdentifier == entry.itemIdentifier || existing.remotePath == entry.remotePath else {
+                return true
+            }
+
+            // Uploads, deletes, directory creation, and moves are all safe to
+            // coalesce for one item/path. Keep an existing operation only when it
+            // represents a different path transition (e.g. unrelated move).
+            // Coalesce repeated operations of the same kind, or operations
+            // targeting the exact same remote path. Preserve different paths
+            // for one item so a queued rename followed by a queued upload is
+            // replayed in order rather than silently dropping one half.
+            return !(existing.action == entry.action || existing.remotePath == entry.remotePath)
         }
         entries[entry.id] = entry
     }

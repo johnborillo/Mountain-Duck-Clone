@@ -40,6 +40,10 @@ public final class CacheEngine: @unchecked Sendable {
     private var retryTimer: DispatchSourceTimer?
     private let maxRetryCount = 10
     private var retryBackoffSeconds: TimeInterval = 5.0
+    private var retryAdapterProvider: (@Sendable () async throws -> RemoteFilesystemAdapter)?
+    /// Serializes journal replay with explicit sync calls so two recovery loops
+    /// cannot upload/delete the same operation concurrently.
+    private let synchronizationQueue = AsyncTransferQueue(maxConcurrent: 1)
 
     /// Initialize the CacheEngine.
     ///
@@ -213,15 +217,21 @@ public final class CacheEngine: @unchecked Sendable {
 
     /// Commit dirty files to remote storage through the adapter.
     public func syncPendingWrites(with adapter: RemoteFilesystemAdapter) async throws {
+        await synchronizationQueue.acquire()
+        do {
+            try await syncPendingWritesLocked(with: adapter)
+            await synchronizationQueue.release()
+        } catch {
+            await synchronizationQueue.release()
+            throw error
+        }
+    }
+
+    private func syncPendingWritesLocked(with adapter: RemoteFilesystemAdapter) async throws {
         let pending = journal.pendingEntries()
         for op in pending {
-            switch op.action {
-            case .upload:
-                guard let localURL = op.localFileURL,
-                      FileManager.default.fileExists(atPath: localURL.path) else {
-                    throw AdapterError.invalidPath("Queued upload content is unavailable for \(op.remotePath). The operation was retained for recovery.")
-                }
-                try await adapter.upload(from: localURL, to: op.remotePath, progress: nil)
+            try await replay(op, with: adapter)
+            if op.action == .upload {
                 sync {
                     if var entry = index[op.itemIdentifier] {
                         entry.state = .materialized
@@ -229,17 +239,93 @@ public final class CacheEngine: @unchecked Sendable {
                         index[op.itemIdentifier] = entry
                     }
                 }
-            case .createDirectory:
-                try await adapter.createDirectory(path: op.remotePath)
-            case .delete:
-                try await adapter.delete(remotePath: op.remotePath)
-            case .move:
-                if let dest = op.destinationRemotePath {
-                    try await adapter.move(from: op.remotePath, to: dest)
-                }
             }
             journal.remove(id: op.id)
         }
+    }
+
+    /// Queue a write operation even when a caller does not yet have a cache entry
+    /// (for example, a native File Provider create that failed before stat).
+    public func enqueue(_ entry: JournalEntry) {
+        journal.replacePendingOperation(with: entry)
+    }
+
+    /// Stage a transient File Provider/Finder source URL into the durable cache
+    /// before queuing its upload. File Provider may delete its temporary source
+    /// as soon as the callback returns, so the journal must never point at it.
+    public func enqueueUpload(itemIdentifier: String, remotePath: String, sourceURL: URL) throws {
+        let durableURL = fileURL(for: itemIdentifier)
+        if sourceURL.standardizedFileURL != durableURL.standardizedFileURL {
+            try FileManager.default.createDirectory(at: durableURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: durableURL.path) {
+                try FileManager.default.removeItem(at: durableURL)
+            }
+            try FileManager.default.copyItem(at: sourceURL, to: durableURL)
+        }
+
+        let attributes = try? FileManager.default.attributesOfItem(atPath: durableURL.path)
+        let fileSize = (attributes?[.size] as? Int64) ?? 0
+        sync {
+            var entry = index[itemIdentifier] ?? CacheEntry(
+                itemIdentifier: itemIdentifier,
+                remotePath: remotePath,
+                localFileName: durableURL.lastPathComponent,
+                fileSize: fileSize,
+                state: .dirty
+            )
+            entry.state = .dirty
+            entry.fileSize = fileSize
+            index[itemIdentifier] = entry
+        }
+        journal.replacePendingUpload(with: JournalEntry(
+            action: .upload,
+            itemIdentifier: itemIdentifier,
+            localFileURL: durableURL,
+            remotePath: remotePath
+        ))
+    }
+
+    private func replay(_ op: JournalEntry, with adapter: RemoteFilesystemAdapter) async throws {
+        switch op.action {
+        case .upload:
+            guard let localURL = op.localFileURL,
+                  FileManager.default.fileExists(atPath: localURL.path) else {
+                throw AdapterError.invalidPath("Queued upload content is unavailable for \(op.remotePath). The operation was retained for recovery.")
+            }
+            try await adapter.upload(from: localURL, to: op.remotePath, progress: nil)
+        case .createDirectory:
+            do {
+                try await adapter.createDirectory(path: op.remotePath)
+            } catch let error {
+                guard let adapterError = error as? AdapterError,
+                      case .alreadyExists = adapterError else { throw error }
+            }
+        case .delete:
+            do {
+                try await adapter.delete(remotePath: op.remotePath)
+            } catch let error {
+                guard let adapterError = error as? AdapterError,
+                      case .fileNotFound = adapterError else { throw error }
+            }
+        case .move:
+            guard let destination = op.destinationRemotePath else {
+                throw AdapterError.invalidPath("Queued move has no destination for \(op.remotePath).")
+            }
+            do {
+                try await adapter.move(from: op.remotePath, to: destination)
+            } catch let error {
+                // A crash after a successful remote move but before journal removal
+                // leaves the source missing. Treat it as applied when the destination
+                // is already present.
+                guard let adapterError = error as? AdapterError,
+                      case .fileNotFound = adapterError,
+                      await remoteItemExists(destination, on: adapter) else { throw error }
+            }
+        }
+    }
+
+    private func remoteItemExists(_ path: String, on adapter: RemoteFilesystemAdapter) async -> Bool {
+        (try? await adapter.stat(path: path)) != nil
     }
 
     // MARK: - Background Retry Scheduler
@@ -247,11 +333,19 @@ public final class CacheEngine: @unchecked Sendable {
     /// Starts a background retry timer that processes pending journal entries with exponential backoff.
     /// Backoff schedule: 5s → 15s → 45s → 135s (capped at 300s), with ±20% jitter.
     public func startRetryScheduler(adapter: RemoteFilesystemAdapter) {
-        sync {
-            guard retryTimer == nil else { return }
+        startRetryScheduler(adapterProvider: { adapter })
+    }
+
+    /// Start retries with a provider that can reconnect instead of retaining a
+    /// dead transport object after a network interruption.
+    public func startRetryScheduler(adapterProvider: @escaping @Sendable () async throws -> RemoteFilesystemAdapter) {
+        let shouldStart: Bool = sync {
+            retryAdapterProvider = adapterProvider
+            guard retryTimer == nil else { return false }
             retryBackoffSeconds = 5.0
+            return true
         }
-        scheduleNextRetry(adapter: adapter)
+        if shouldStart { scheduleNextRetry() }
     }
 
     /// Stops the background retry timer.
@@ -259,10 +353,12 @@ public final class CacheEngine: @unchecked Sendable {
         sync {
             retryTimer?.cancel()
             retryTimer = nil
+            retryAdapterProvider = nil
         }
     }
 
-    private func scheduleNextRetry(adapter: RemoteFilesystemAdapter) {
+    private func scheduleNextRetry() {
+        guard sync({ retryAdapterProvider != nil }) else { return }
         let backoff: TimeInterval = sync { retryBackoffSeconds }
         let jitter = backoff * Double.random(in: -0.2...0.2)
         let delay = max(1.0, backoff + jitter)
@@ -272,7 +368,7 @@ public final class CacheEngine: @unchecked Sendable {
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
             Task {
-                await self.executeRetry(adapter: adapter)
+                await self.executeRetry()
             }
         }
         sync {
@@ -282,12 +378,32 @@ public final class CacheEngine: @unchecked Sendable {
         timer.resume()
     }
 
-    private func executeRetry(adapter: RemoteFilesystemAdapter) async {
+    private func executeRetry() async {
+        await synchronizationQueue.acquire()
         let pending = journal.pendingEntries()
         guard !pending.isEmpty else {
             // Nothing to retry — reset backoff and reschedule with base interval
             sync { retryBackoffSeconds = 5.0 }
-            scheduleNextRetry(adapter: adapter)
+            await synchronizationQueue.release()
+            scheduleNextRetry()
+            return
+        }
+
+        let provider: (@Sendable () async throws -> RemoteFilesystemAdapter)? = sync { retryAdapterProvider }
+        guard let provider else {
+            await synchronizationQueue.release()
+            scheduleNextRetry()
+            return
+        }
+
+        let adapter: RemoteFilesystemAdapter
+        do {
+            adapter = try await provider()
+        } catch {
+            incrementRetryCounts(for: pending)
+            sync { retryBackoffSeconds = min(retryBackoffSeconds * 3.0, 300.0) }
+            await synchronizationQueue.release()
+            scheduleNextRetry()
             return
         }
 
@@ -299,27 +415,14 @@ public final class CacheEngine: @unchecked Sendable {
             }
 
             do {
-                switch op.action {
-                case .upload:
-                    guard let localURL = op.localFileURL,
-                          FileManager.default.fileExists(atPath: localURL.path) else {
-                        throw AdapterError.invalidPath("Queued upload content is unavailable for \(op.remotePath).")
-                    }
-                    try await adapter.upload(from: localURL, to: op.remotePath, progress: nil)
+                try await replay(op, with: adapter)
+                if op.action == .upload {
                     sync {
                         if var entry = index[op.itemIdentifier] {
                             entry.state = .materialized
                             entry.remoteModificationDate = Date()
                             index[op.itemIdentifier] = entry
                         }
-                    }
-                case .createDirectory:
-                    try await adapter.createDirectory(path: op.remotePath)
-                case .delete:
-                    try await adapter.delete(remotePath: op.remotePath)
-                case .move:
-                    if let dest = op.destinationRemotePath {
-                        try await adapter.move(from: op.remotePath, to: dest)
                     }
                 }
                 journal.remove(id: op.id)
@@ -341,7 +444,17 @@ public final class CacheEngine: @unchecked Sendable {
                 retryBackoffSeconds = min(retryBackoffSeconds * 3.0, 300.0)
             }
         }
-        scheduleNextRetry(adapter: adapter)
+        await synchronizationQueue.release()
+        scheduleNextRetry()
+    }
+
+    private func incrementRetryCounts(for entries: [JournalEntry]) {
+        for entry in entries {
+            var updated = entry
+            updated.retryCount += 1
+            journal.remove(id: entry.id)
+            journal.append(updated)
+        }
     }
 
     /// Returns journal entries that have exceeded the maximum retry count.
