@@ -182,17 +182,10 @@ public final class VolumeMountManager: @unchecked Sendable {
         try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: localURL.path)
         try FileManager.default.createDirectory(at: localURL, withIntermediateDirectories: true)
 
-        let remoteItems: [RemoteFileEntry]
-        do {
-            remoteItems = try await adapter.listDirectory(path: remotePath)
-        } catch {
-            // Directory does not exist on remote server yet (e.g. user created or dropped folder locally)
-            if !isReadOnly {
-                try? await adapter.createDirectory(path: remotePath)
-            }
-            sync { populatedDirs.insert(remotePath) }
-            return []
-        }
+        // A listing failure is never proof that a directory was created locally.
+        // Treating authentication, permission, or transport errors as an empty
+        // directory made mounts look healthy while silently diverging from SFTP.
+        let remoteItems = try await adapter.listDirectory(path: remotePath)
         let remoteNames = Set(remoteItems.map { $0.name })
         let volumeName = localURL.pathComponents.count > 2 ? localURL.pathComponents[2] : "OpenDuck"
 
@@ -341,7 +334,7 @@ public final class VolumeMountManager: @unchecked Sendable {
             let localURL = relPath.isEmpty ? volumeURL : volumeURL.appendingPathComponent(relPath)
 
             if FileManager.default.fileExists(atPath: localURL.path) {
-                _ = try? await populateDirectory(
+                _ = try await populateDirectory(
                     adapter: adapter,
                     remotePath: dirRemotePath,
                     localURL: localURL,
@@ -647,6 +640,15 @@ public final class WatcherContext: @unchecked Sendable {
         exists: Bool
     ) {
         if isReadOnly { return }
+        if isDir {
+            MetadataDatabase.shared.recordDivergenceEvent(
+                volumeName: volumeURL.lastPathComponent,
+                path: remotePath,
+                reason: "Legacy mount directory rename/move is disabled until File Provider migration. Remote data was left unchanged."
+            )
+            onStatusChange?("⚠️ Folder move is not synced in Legacy Preview; remote data was preserved.")
+            return
+        }
         if lock.withLock({ isStopped }) { return }
         // Our own moves (staging renames, eviction) must never round-trip.
         if manager.isSelfInitiatedRemoval(path: localPath) { return }
@@ -819,8 +821,6 @@ public final class WatcherContext: @unchecked Sendable {
            localPath.contains("/.Trashes") ||
            localPath.contains("/.Trash") ||
            filename.contains(".nosync") ||
-           filename.hasPrefix(".dat.") ||
-           filename.hasPrefix(".dat") ||
            filename.contains(".sb-") ||
            filename == ".fseventsd" ||
            filename.hasSuffix(".tmp") ||
@@ -874,17 +874,36 @@ public final class WatcherContext: @unchecked Sendable {
 
                     Task {
                         defer { self.lock.withLock { _ = self.pendingPaths.remove(remotePath) } }
-                        guard (try? await self.adapter.stat(path: remotePath)) != nil else {
-                            // Local-only directory (freshly created, or the arrival half of a move
-                            // still awaiting correlation). Nothing to enumerate.
+                        do {
+                            _ = try await self.adapter.stat(path: remotePath)
+                            _ = try await self.manager.populateDirectory(
+                                adapter: self.adapter,
+                                remotePath: remotePath,
+                                localURL: localURL,
+                                cacheEngine: self.cacheEngine,
+                                isReadOnly: self.isReadOnly
+                            )
+                        } catch let error as AdapterError {
+                            guard case .fileNotFound = error else {
+                                self.onStatusChange?("⚠️ Cannot access folder \(filename): \(error.localizedDescription)")
+                                return
+                            }
+                            do {
+                                try await self.adapter.createDirectory(path: remotePath)
+                                self.manager.markPopulated(remotePath: remotePath)
+                                self.onStatusChange?("✓ Created folder \(filename)")
+                            } catch {
+                                self.cacheEngine.journal.append(JournalEntry(
+                                    action: .createDirectory,
+                                    itemIdentifier: self.cacheEngine.itemIdentifier(for: remotePath),
+                                    remotePath: remotePath
+                                ))
+                                self.onStatusChange?("⚠️ Folder creation queued: \(filename)")
+                            }
+                        } catch {
+                            self.onStatusChange?("⚠️ Cannot access folder \(filename): \(error.localizedDescription)")
                             return
                         }
-                        _ = try? await self.manager.populateDirectory(
-                            adapter: self.adapter,
-                            remotePath: remotePath,
-                            localURL: localURL,
-                            cacheEngine: self.cacheEngine
-                        )
                     }
                 }
             } else if isRemoved {
@@ -895,32 +914,12 @@ public final class WatcherContext: @unchecked Sendable {
                     return
                 }
 
-                let dirItemId = self.cacheEngine.itemIdentifier(for: remotePath)
-                guard recordAndCheckCircuitBreaker() else {
-                    // Journal the blocked directory deletion
-                    let journalEntry = JournalEntry(
-                        action: .delete,
-                        itemIdentifier: dirItemId,
-                        remotePath: remotePath
-                    )
-                    self.cacheEngine.journal.append(journalEntry)
-                    return
-                }
-                Task {
-                    do {
-                        try await self.adapter.delete(remotePath: remotePath)
-                        self.manager.invalidateDirectory(remotePath: remotePath)
-                    } catch {
-                        // Journal the failed directory deletion for retry
-                        let journalEntry = JournalEntry(
-                            action: .delete,
-                            itemIdentifier: dirItemId,
-                            remotePath: remotePath
-                        )
-                        self.cacheEngine.journal.append(journalEntry)
-                        print("🔄 [OpenDuck] Directory delete failed, journaled for retry: \(remotePath) — \(error)")
-                    }
-                }
+                MetadataDatabase.shared.recordDivergenceEvent(
+                    volumeName: volumeURL.lastPathComponent,
+                    path: remotePath,
+                    reason: "Legacy mount directory deletion is disabled to prevent unbounded recursive remote deletion."
+                )
+                self.onStatusChange?("⚠️ Folder deletion is not synced in Legacy Preview; remote data was preserved.")
             }
             return
         }

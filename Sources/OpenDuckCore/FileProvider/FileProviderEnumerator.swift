@@ -5,18 +5,21 @@ import FileProvider
 public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @unchecked Sendable {
     private let containerItemIdentifier: NSFileProviderItemIdentifier
     private let remotePath: String
-    private let adapter: RemoteFilesystemAdapter
+    private let profileID: UUID
+    private let connectionManager: ConnectionManager
     private let cacheEngine: CacheEngine
 
     public init(
         containerItemIdentifier: NSFileProviderItemIdentifier,
         remotePath: String,
-        adapter: RemoteFilesystemAdapter,
+        profileID: UUID,
+        connectionManager: ConnectionManager,
         cacheEngine: CacheEngine
     ) {
         self.containerItemIdentifier = containerItemIdentifier
         self.remotePath = remotePath
-        self.adapter = adapter
+        self.profileID = profileID
+        self.connectionManager = connectionManager
         self.cacheEngine = cacheEngine
         super.init()
     }
@@ -28,7 +31,8 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
     public func enumerateItems(for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage) {
         Task {
             do {
-                let entries = try await self.adapter.listDirectory(path: self.remotePath)
+                let adapter = try await self.connectionManager.connect(to: self.profileID)
+                let entries = try await adapter.listDirectory(path: self.remotePath)
                 var items: [NSFileProviderItem] = []
 
                 for entry in entries {

@@ -38,10 +38,12 @@ public final class AppViewModel: ObservableObject {
         self.volumeManager = volumeManager
         // Decoupling Safety Guarantee: The local cache directory MUST be placed in user Caches,
         // separate from any /Volumes/ path, so cache evictions do not generate FSEvents in mounted volumes.
-        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("com.openduck.app/cache")
+        let cacheDir = OpenDuckSharedStorage.cacheDirectory
         assert(!cacheDir.path.hasPrefix("/Volumes/"), "cacheDir must not reside inside /Volumes")
-        self.cacheEngine = cacheEngine ?? CacheEngine(cacheDirectory: cacheDir)
+        self.cacheEngine = cacheEngine ?? CacheEngine(
+            cacheDirectory: cacheDir,
+            journalURL: OpenDuckSharedStorage.uploadJournalURL
+        )
 
         loadInitialData()
         startPeriodicRefresh()
@@ -172,6 +174,7 @@ public final class AppViewModel: ObservableObject {
 
         do {
             let adapter = try await connectionManager.connect(to: profile.id)
+            try await cacheEngine.syncPendingWrites(with: adapter)
             let volumeURL = URL(fileURLWithPath: "/Volumes/\(profile.name)")
 
             if !FileManager.default.fileExists(atPath: volumeURL.path) {

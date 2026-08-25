@@ -6,6 +6,9 @@ public final class MockFileSystemAdapter: RemoteFilesystemAdapter, @unchecked Se
     private var _isConnected: Bool = false
     private var fileStore: [String: (data: Data, entry: RemoteFileEntry)] = [:]
     private var directories: Set<String> = ["/"]
+    private var _uploadedPaths: [String] = []
+    private var _deletedPaths: [String] = []
+    private var _movedPaths: [(String, String)] = []
 
     public let endpointDescription: String
     public var simulatedLatencyMs: UInt32 = 0
@@ -25,6 +28,12 @@ public final class MockFileSystemAdapter: RemoteFilesystemAdapter, @unchecked Se
     public var isConnected: Bool {
         sync { _isConnected }
     }
+
+    /// Operation traces support assertions about filesystem intent without
+    /// inspecting private in-memory state in tests.
+    public var uploadedPaths: [String] { sync { _uploadedPaths } }
+    public var deletedPaths: [String] { sync { _deletedPaths } }
+    public var movedPaths: [(String, String)] { sync { _movedPaths } }
 
     public func connect() async throws {
         try await simulateNetwork()
@@ -153,6 +162,7 @@ public final class MockFileSystemAdapter: RemoteFilesystemAdapter, @unchecked Se
                 modificationDate: Date()
             )
             fileStore[normalized] = (data: data, entry: entry)
+            _uploadedPaths.append(normalized)
         }
 
         progress?.completedUnitCount = Int64(data.count)
@@ -185,6 +195,7 @@ public final class MockFileSystemAdapter: RemoteFilesystemAdapter, @unchecked Se
 
             let normalized = normalizePath(remotePath)
             if fileStore.removeValue(forKey: normalized) != nil {
+                _deletedPaths.append(normalized)
                 return
             }
 
@@ -193,6 +204,7 @@ public final class MockFileSystemAdapter: RemoteFilesystemAdapter, @unchecked Se
                 let prefix = normalized.hasSuffix("/") ? normalized : normalized + "/"
                 directories = directories.filter { !$0.hasPrefix(prefix) }
                 fileStore = fileStore.filter { !$0.key.hasPrefix(prefix) }
+                _deletedPaths.append(normalized)
                 return
             }
 
@@ -220,12 +232,14 @@ public final class MockFileSystemAdapter: RemoteFilesystemAdapter, @unchecked Se
                     modificationDate: Date()
                 )
                 fileStore[dstNorm] = (data: file.data, entry: newEntry)
+                _movedPaths.append((srcNorm, dstNorm))
                 return
             }
 
             if directories.contains(srcNorm) {
                 directories.remove(srcNorm)
                 directories.insert(dstNorm)
+                _movedPaths.append((srcNorm, dstNorm))
                 return
             }
 

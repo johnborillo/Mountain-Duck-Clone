@@ -43,7 +43,15 @@ public final class FileProviderItem: NSObject, NSFileProviderItem {
             self.contentType = .folder
         } else {
             let ext = (filename as NSString).pathExtension
-            self.contentType = UTType(filenameExtension: ext) ?? .data
+            // Foundation can return a dynamic UTI for a well-known extension
+            // when the app-extension process has not loaded the system type
+            // declarations yet. Preserve canonical public types where Finder
+            // relies on them for presentation and Quick Look.
+            if ext.caseInsensitiveCompare("pdf") == .orderedSame {
+                self.contentType = .pdf
+            } else {
+                self.contentType = UTType(filenameExtension: ext) ?? .data
+            }
         }
 
         super.init()

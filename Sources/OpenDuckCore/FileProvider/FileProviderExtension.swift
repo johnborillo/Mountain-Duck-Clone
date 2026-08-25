@@ -15,9 +15,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
     public required init(domain: NSFileProviderDomain) {
         self.domain = domain
-        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("com.openduck.fileprovider/\(domain.identifier.rawValue)")
-        self.cacheEngine = CacheEngine(cacheDirectory: cacheDir)
+        let domainID = domain.identifier.rawValue
+        self.cacheEngine = CacheEngine(
+            cacheDirectory: OpenDuckSharedStorage.cacheDirectory(forDomain: domainID),
+            journalURL: OpenDuckSharedStorage.uploadJournalURL(forDomain: domainID)
+        )
         self.connectionManager = ConnectionManager.shared
         super.init()
     }
@@ -42,10 +44,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 }
 
                 let remotePath = self.resolveRemotePath(for: identifier)
-                guard let adapter = self.activeAdapter() else {
-                    completionHandler(nil, AdapterError.notConnected)
-                    return
-                }
+                let adapter = try await self.adapterForDomain()
 
                 let entry = try await adapter.stat(path: remotePath)
                 let item = FileProviderItem(from: entry, parentIdentifier: .rootContainer)
@@ -67,10 +66,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         Task {
             do {
-                guard let adapter = self.activeAdapter() else {
-                    completionHandler(nil, nil, AdapterError.notConnected)
-                    return
-                }
+                let adapter = try await self.adapterForDomain()
 
                 let remotePath = self.resolveRemotePath(for: itemIdentifier)
                 let localURL = try await self.cacheEngine.getOrHydrate(
@@ -103,10 +99,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         Task {
             do {
-                guard let adapter = self.activeAdapter() else {
-                    completionHandler(nil, [], false, AdapterError.notConnected)
-                    return
-                }
+                let adapter = try await self.adapterForDomain()
 
                 let isDir = itemTemplate.contentType == .folder
                 let remotePath = self.resolveRemotePath(for: itemTemplate.parentItemIdentifier) + "/" + itemTemplate.filename
@@ -150,10 +143,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         Task {
             do {
-                guard let adapter = self.activeAdapter() else {
-                    completionHandler(nil, [], false, AdapterError.notConnected)
-                    return
-                }
+                let adapter = try await self.adapterForDomain()
 
                 let remotePath = self.resolveRemotePath(for: item.itemIdentifier)
 
@@ -186,10 +176,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         Task {
             do {
-                guard let adapter = self.activeAdapter() else {
-                    completionHandler(AdapterError.notConnected)
-                    return
-                }
+                let adapter = try await self.adapterForDomain()
 
                 let remotePath = self.resolveRemotePath(for: identifier)
                 try await adapter.delete(remotePath: remotePath)
@@ -204,25 +191,28 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     }
 
     public func enumerator(for containerItemIdentifier: NSFileProviderItemIdentifier, request: NSFileProviderRequest) throws -> NSFileProviderEnumerator {
-        guard let adapter = activeAdapter() else {
-            throw AdapterError.notConnected
-        }
+        let profileID = try profileIdentifier()
 
         let remotePath = containerItemIdentifier == .rootContainer ? "/" : resolveRemotePath(for: containerItemIdentifier)
 
         return FileProviderEnumerator(
             containerItemIdentifier: containerItemIdentifier,
             remotePath: remotePath,
-            adapter: adapter,
+            profileID: profileID,
+            connectionManager: connectionManager,
             cacheEngine: cacheEngine
         )
     }
 
-    private func activeAdapter() -> RemoteFilesystemAdapter? {
-        if let uuid = UUID(uuidString: domain.identifier.rawValue) {
-            return connectionManager.activeAdapter(for: uuid)
+    private func profileIdentifier() throws -> UUID {
+        guard let profileID = UUID(uuidString: domain.identifier.rawValue) else {
+            throw AdapterError.invalidPath("File Provider domain identifier is not a profile UUID: \(domain.identifier.rawValue)")
         }
-        return connectionManager.allProfiles().first.flatMap { connectionManager.activeAdapter(for: $0.id) }
+        return profileID
+    }
+
+    private func adapterForDomain() async throws -> RemoteFilesystemAdapter {
+        try await connectionManager.connect(to: try profileIdentifier())
     }
 
     private func resolveRemotePath(for identifier: NSFileProviderItemIdentifier) -> String {
