@@ -27,7 +27,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     }
 
     public func invalidate() {
-        // Cleanup domain resources
+        cacheEngine.stopRetryScheduler()
     }
 
     public func item(for identifier: NSFileProviderItemIdentifier, request: NSFileProviderRequest, completionHandler: @escaping (NSFileProviderItem?, Error?) -> Void) -> Progress {
@@ -113,17 +113,57 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         Task {
             do {
-                let adapter = try await self.adapterForDomain()
-
                 let isDir = itemTemplate.contentType == .folder
                 let remotePath = self.appendPath(self.resolveRemotePath(for: itemTemplate.parentItemIdentifier), itemTemplate.filename)
+                let fileSize: Int64 = {
+                    guard let url else { return 0 }
+                    let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+                    return (attributes?[.size] as? Int64) ?? 0
+                }()
+                let provisionalEntry = RemoteFileEntry(
+                    name: itemTemplate.filename,
+                    path: remotePath,
+                    itemType: isDir ? .directory : .file,
+                    size: fileSize
+                )
+                let provisional = self.metadataStore.upsert(
+                    domainIdentifier: self.domain.identifier.rawValue,
+                    parentItemIdentifier: itemTemplate.parentItemIdentifier.rawValue,
+                    entry: provisionalEntry
+                )
 
                 if isDir {
-                    try await adapter.createDirectory(path: remotePath)
+                    self.cacheEngine.enqueue(JournalEntry(
+                        action: .createDirectory,
+                        itemIdentifier: provisional.itemIdentifier,
+                        remotePath: remotePath
+                    ))
                 } else if let localURL = url {
+                    try self.cacheEngine.enqueueUpload(
+                        itemIdentifier: provisional.itemIdentifier,
+                        remotePath: remotePath,
+                        sourceURL: localURL
+                    )
+                } else {
+                    throw AdapterError.invalidPath("File Provider create for '\(itemTemplate.filename)' did not include file contents.")
+                }
+
+                let adapter = try await self.adapterForDomain()
+
+                if isDir {
+                    do {
+                        try await adapter.createDirectory(path: remotePath)
+                    } catch let error {
+                        if let adapterError = error as? AdapterError, case .alreadyExists = adapterError {
+                            // Finder may retry a create after a response was lost.
+                        } else {
+                            throw error
+                        }
+                    }
+                } else {
                     await self.transferQueue.acquire()
                     defer { Task { await self.transferQueue.release() } }
-                    try await adapter.upload(from: localURL, to: remotePath, progress: progress)
+                    try await adapter.upload(from: self.cacheEngine.fileURL(for: provisional.itemIdentifier), to: remotePath, progress: progress)
                 }
 
                 let entry = try await adapter.stat(path: remotePath)
@@ -132,6 +172,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     parentItemIdentifier: itemTemplate.parentItemIdentifier.rawValue,
                     entry: entry
                 )
+                self.cacheEngine.markClean(itemIdentifier: provisional.itemIdentifier, remotePath: remotePath)
                 let newItem = FileProviderItem(from: metadata, isDownloaded: isDir || url != nil)
                 completionHandler(newItem, fields, false, nil)
             } catch {
@@ -155,20 +196,41 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         Task {
             do {
-                let adapter = try await self.adapterForDomain()
-
                 guard let existing = self.metadataStore.item(for: item.itemIdentifier.rawValue, domainIdentifier: self.domain.identifier.rawValue) else {
                     throw AdapterError.fileNotFound(item.itemIdentifier.rawValue)
                 }
                 var remotePath = existing.remotePath
+                let hasMove = changedFields.contains(.filename) || changedFields.contains(.parentItemIdentifier)
+                var destinationPath: String?
 
-                if changedFields.contains(.filename) || changedFields.contains(.parentItemIdentifier) {
+                if hasMove {
                     let destinationParent = self.resolveRemotePath(for: item.parentItemIdentifier)
-                    let destinationPath = self.appendPath(destinationParent, item.filename)
-                    if let conflicting = self.metadataStore.item(forRemotePath: destinationPath, domainIdentifier: self.domain.identifier.rawValue), conflicting.itemIdentifier != item.itemIdentifier.rawValue, !conflicting.isDeleted {
-                        throw AdapterError.alreadyExists(destinationPath)
+                    let targetPath = self.appendPath(destinationParent, item.filename)
+                    if let conflicting = self.metadataStore.item(forRemotePath: targetPath, domainIdentifier: self.domain.identifier.rawValue), conflicting.itemIdentifier != item.itemIdentifier.rawValue, !conflicting.isDeleted {
+                        throw AdapterError.alreadyExists(targetPath)
                     }
+                    destinationPath = targetPath
+                    self.cacheEngine.enqueue(JournalEntry(
+                        action: .move,
+                        itemIdentifier: item.itemIdentifier.rawValue,
+                        remotePath: existing.remotePath,
+                        destinationRemotePath: targetPath
+                    ))
+                }
+
+                if let fileURL = newContents {
+                    try self.cacheEngine.enqueueUpload(
+                        itemIdentifier: item.itemIdentifier.rawValue,
+                        remotePath: destinationPath ?? existing.remotePath,
+                        sourceURL: fileURL
+                    )
+                }
+
+                let adapter = try await self.adapterForDomain()
+
+                if let destinationPath {
                     try await adapter.move(from: existing.remotePath, to: destinationPath)
+                    self.cacheEngine.markClean(itemIdentifier: item.itemIdentifier.rawValue, remotePath: existing.remotePath)
                     _ = self.metadataStore.move(
                         domainIdentifier: self.domain.identifier.rawValue,
                         itemIdentifier: item.itemIdentifier.rawValue,
@@ -179,11 +241,11 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                     remotePath = destinationPath
                 }
 
-                if let fileURL = newContents {
-                    self.cacheEngine.markDirty(itemIdentifier: item.itemIdentifier.rawValue, newLocalURL: fileURL)
+                if newContents != nil {
                     await self.transferQueue.acquire()
                     defer { Task { await self.transferQueue.release() } }
-                    try await adapter.upload(from: fileURL, to: remotePath, progress: progress)
+                    try await adapter.upload(from: self.cacheEngine.fileURL(for: item.itemIdentifier.rawValue), to: remotePath, progress: progress)
+                    self.cacheEngine.markClean(itemIdentifier: item.itemIdentifier.rawValue, remotePath: remotePath)
                 }
 
                 let updatedEntry = try await adapter.stat(path: remotePath)
@@ -214,10 +276,23 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
 
         Task {
             do {
-                let adapter = try await self.adapterForDomain()
-
                 let remotePath = self.resolveRemotePath(for: identifier)
-                try await adapter.delete(remotePath: remotePath)
+                self.cacheEngine.enqueue(JournalEntry(
+                    action: .delete,
+                    itemIdentifier: identifier.rawValue,
+                    remotePath: remotePath
+                ))
+                let adapter = try await self.adapterForDomain()
+                do {
+                    try await adapter.delete(remotePath: remotePath)
+                } catch let error {
+                    if let adapterError = error as? AdapterError, case .fileNotFound = adapterError {
+                        // A replayed Finder delete is already applied remotely.
+                    } else {
+                        throw error
+                    }
+                }
+                self.cacheEngine.markClean(itemIdentifier: identifier.rawValue, remotePath: remotePath)
                 try? self.cacheEngine.evict(itemIdentifier: identifier.rawValue)
                 self.metadataStore.markDeleted(domainIdentifier: self.domain.identifier.rawValue, itemIdentifier: identifier.rawValue)
                 completionHandler(nil)
@@ -253,6 +328,14 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
     }
 
     private func adapterForDomain() async throws -> RemoteFilesystemAdapter {
+        cacheEngine.startRetryScheduler { [weak self] in
+            guard let self else { throw AdapterError.notConnected }
+            return try await self.connectAdapterForDomain()
+        }
+        return try await connectAdapterForDomain()
+    }
+
+    private func connectAdapterForDomain() async throws -> RemoteFilesystemAdapter {
         try await connectionManager.connect(to: try profileIdentifier())
     }
 

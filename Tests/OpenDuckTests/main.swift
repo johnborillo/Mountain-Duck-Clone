@@ -78,6 +78,11 @@ func runAllTests() async throws {
     await runTest("CacheEngineTests.testPurgeUnpinnedProtectsDirtyAndPinnedFiles") { try await cacheTests.testPurgeUnpinnedProtectsDirtyAndPinnedFiles() }
     await runTest("CacheEngineTests.testLatestPendingUploadIsPersistedAndSupersedesOlderSave") { try cacheTests.testLatestPendingUploadIsPersistedAndSupersedesOlderSave() }
     await runTest("CacheEngineTests.testMissingQueuedUploadIsRetainedForRecovery") { try await cacheTests.testMissingQueuedUploadIsRetainedForRecovery() }
+    await runTest("CacheEngineTests.testEnqueueUploadStagesTransientSourceDurably") { try await cacheTests.testEnqueueUploadStagesTransientSourceDurably() }
+    await runTest("CacheEngineTests.testReplayedDeleteMissingRemoteIsIdempotent") { try await cacheTests.testReplayedDeleteMissingRemoteIsIdempotent() }
+    await runTest("CacheEngineTests.testReplayedMoveAfterRemoteSuccessIsIdempotent") { try await cacheTests.testReplayedMoveAfterRemoteSuccessIsIdempotent() }
+    await runTest("CacheEngineTests.testQueuedRenameAndUploadPreserveBothOperations") { try cacheTests.testQueuedRenameAndUploadPreserveBothOperations() }
+    await runTest("CacheEngineTests.testReplayedCreateDirectoryAlreadyExistsIsIdempotent") { try await cacheTests.testReplayedCreateDirectoryAlreadyExistsIsIdempotent() }
     try cacheTests.tearDownWithError()
 
     // DeleteSyncTests

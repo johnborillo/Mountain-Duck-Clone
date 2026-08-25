@@ -161,4 +161,86 @@ final class CacheEngineTests: XCTestCase {
             XCTAssertEqual(engine.journal.count, 1)
         }
     }
+
+    func testEnqueueUploadStagesTransientSourceDurably() async throws {
+        let journalURL = tempCacheDir.appendingPathComponent("journal-staged.json")
+        let engine = CacheEngine(cacheDirectory: tempCacheDir, journalURL: journalURL)
+        let sourceURL = tempCacheDir.appendingPathComponent("finder-transient.txt")
+        try Data("durable snapshot".utf8).write(to: sourceURL)
+
+        try engine.enqueueUpload(itemIdentifier: "stable-id", remotePath: "/staged.txt", sourceURL: sourceURL)
+        let queued = engine.journal.pendingEntries().first
+        XCTAssertEqual(queued?.localFileURL, engine.fileURL(for: "stable-id"))
+
+        try FileManager.default.removeItem(at: sourceURL)
+        let adapter = MockFileSystemAdapter()
+        try await adapter.connect()
+        try await engine.syncPendingWrites(with: adapter)
+
+        let verifyURL = tempCacheDir.appendingPathComponent("verify-staged.txt")
+        try await adapter.download(remotePath: "/staged.txt", to: verifyURL, progress: nil)
+        XCTAssertEqual(try String(contentsOf: verifyURL, encoding: .utf8), "durable snapshot")
+    }
+
+    func testReplayedDeleteMissingRemoteIsIdempotent() async throws {
+        let engine = CacheEngine(cacheDirectory: tempCacheDir, journalURL: tempCacheDir.appendingPathComponent("journal-delete.json"))
+        engine.enqueue(JournalEntry(action: .delete, itemIdentifier: "delete-id", remotePath: "/already-gone.txt"))
+
+        let adapter = MockFileSystemAdapter()
+        try await adapter.connect()
+        try await engine.syncPendingWrites(with: adapter)
+
+        XCTAssertEqual(engine.journal.count, 0)
+    }
+
+    func testReplayedMoveAfterRemoteSuccessIsIdempotent() async throws {
+        let engine = CacheEngine(cacheDirectory: tempCacheDir, journalURL: tempCacheDir.appendingPathComponent("journal-move.json"))
+        let adapter = MockFileSystemAdapter()
+        try await adapter.connect()
+        adapter.seedFile(path: "/before.txt", content: "move once")
+        try await adapter.move(from: "/before.txt", to: "/after.txt")
+
+        engine.enqueue(JournalEntry(
+            action: .move,
+            itemIdentifier: "move-id",
+            remotePath: "/before.txt",
+            destinationRemotePath: "/after.txt"
+        ))
+        try await engine.syncPendingWrites(with: adapter)
+
+        XCTAssertEqual(engine.journal.count, 0)
+        let verifyURL = tempCacheDir.appendingPathComponent("verify-move.txt")
+        try await adapter.download(remotePath: "/after.txt", to: verifyURL, progress: nil)
+        XCTAssertEqual(try String(contentsOf: verifyURL, encoding: .utf8), "move once")
+    }
+
+    func testQueuedRenameAndUploadPreserveBothOperations() throws {
+        let engine = CacheEngine(cacheDirectory: tempCacheDir, journalURL: tempCacheDir.appendingPathComponent("journal-compound.json"))
+        let sourceURL = tempCacheDir.appendingPathComponent("compound-source.txt")
+        try Data("new content".utf8).write(to: sourceURL)
+
+        engine.enqueue(JournalEntry(
+            action: .move,
+            itemIdentifier: "compound-id",
+            remotePath: "/old.txt",
+            destinationRemotePath: "/new.txt"
+        ))
+        try engine.enqueueUpload(itemIdentifier: "compound-id", remotePath: "/new.txt", sourceURL: sourceURL)
+
+        let pending = engine.journal.pendingEntries()
+        XCTAssertEqual(pending.count, 2)
+        XCTAssertEqual(pending[0].action, JournalAction.move)
+        XCTAssertEqual(pending[1].action, JournalAction.upload)
+    }
+
+    func testReplayedCreateDirectoryAlreadyExistsIsIdempotent() async throws {
+        let engine = CacheEngine(cacheDirectory: tempCacheDir, journalURL: tempCacheDir.appendingPathComponent("journal-create.json"))
+        let adapter = MockFileSystemAdapter()
+        try await adapter.connect()
+        try await adapter.createDirectory(path: "/existing")
+        engine.enqueue(JournalEntry(action: .createDirectory, itemIdentifier: "directory-id", remotePath: "/existing"))
+
+        try await engine.syncPendingWrites(with: adapter)
+        XCTAssertEqual(engine.journal.count, 0)
+    }
 }

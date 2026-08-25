@@ -182,6 +182,10 @@ public final class MockFileSystemAdapter: RemoteFilesystemAdapter, @unchecked Se
                 throw AdapterError.fileNotFound(parent)
             }
 
+            if directories.contains(normalized) || fileStore[normalized] != nil {
+                throw AdapterError.alreadyExists(path)
+            }
+
             directories.insert(normalized)
         }
     }
