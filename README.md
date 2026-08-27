@@ -61,7 +61,15 @@ To compile, assemble, sign ad hoc, and install the app plus File Provider extens
 ./scripts/build_app.sh
 ```
 
-The current distribution script is development-oriented and defaults to ad-hoc signing. Ad-hoc builds cannot carry the restricted shared-Keychain entitlement, so password authentication and encrypted-key passphrases are only available to Finder in a correctly provisioned team-signed build; an unencrypted SSH key selected with **Browse** remains suitable for local development. Set `OPENDUCK_SIGNING_IDENTITY` to a valid signing identity when using matching App Group and Keychain provisioning. A distributable release still needs a canonical Xcode project, provisioning, hardened runtime, notarization, and release signing.
+The current distribution script defaults to ad-hoc signing, which can build the host and inspect Finder registration but cannot authorize a shared App Group for the File Provider extension. Functional Finder enumeration requires an Apple Development identity and team identifier:
+
+```bash
+OPENDUCK_SIGNING_IDENTITY="Apple Development: Your Name (TEAMID)" \
+OPENDUCK_TEAM_IDENTIFIER="TEAMID" \
+./scripts/build_app.sh
+```
+
+For local macOS development the script defaults to the unprovisioned `TEAMID.com.openduck` App Group form supported by macOS. Password authentication and encrypted-key passphrases additionally require a provisioned shared Keychain group passed as `OPENDUCK_KEYCHAIN_ACCESS_GROUP`; an unencrypted SSH key selected with **Browse** needs no shared secret. A distributable release still needs a canonical Xcode project, provisioning, hardened runtime, notarization, and release signing.
 
 After upgrading from an earlier build, OpenDuck automatically recreates only its broken local Finder domain records; remote SFTP data and the durable OpenDuck operation journal are not deleted. Existing SSH-key profiles must be edited once so the key can be selected with **Browse** and macOS can issue persistent read permission to the extension.
 

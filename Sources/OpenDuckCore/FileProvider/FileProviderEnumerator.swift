@@ -45,7 +45,7 @@ public final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @
                 observer.didEnumerate(items)
                 observer.finishEnumerating(upTo: nil)
             } catch {
-                observer.finishEnumeratingWithError(error)
+                observer.finishEnumeratingWithError(FileProviderErrorMapper.map(error))
             }
         }
     }

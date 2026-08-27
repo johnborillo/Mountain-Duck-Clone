@@ -1,4 +1,5 @@
 import Foundation
+import FileProvider
 import OpenDuckCore
 
 final class SharedAccessTests: XCTestCase {
@@ -39,5 +40,20 @@ final class SharedAccessTests: XCTestCase {
         let description = FileProviderDomainCoordinator.diagnosticDescription(for: outer)
         XCTAssertTrue(description.contains("NSFileProviderErrorDomain -2001"))
         XCTAssertTrue(description.contains("NSCocoaErrorDomain 4099"))
+    }
+
+    func testAdapterErrorsAreMappedToSupportedFileProviderErrors() {
+        let authentication = FileProviderErrorMapper.map(
+            AdapterError.authenticationFailed("missing key permission")
+        ) as NSError
+        XCTAssertEqual(authentication.domain, NSFileProviderErrorDomain)
+        XCTAssertEqual(authentication.code, NSFileProviderError.notAuthenticated.rawValue)
+        XCTAssertTrue(authentication.userInfo[NSUnderlyingErrorKey] is NSError)
+
+        let missingProfile = FileProviderErrorMapper.map(
+            AdapterError.invalidPath("Server profile not found")
+        ) as NSError
+        XCTAssertEqual(missingProfile.domain, NSFileProviderErrorDomain)
+        XCTAssertEqual(missingProfile.code, NSFileProviderError.cannotSynchronize.rawValue)
     }
 }

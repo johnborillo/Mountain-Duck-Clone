@@ -61,7 +61,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 let item = FileProviderItem(from: metadata)
                 completionHandler(item, nil)
             } catch {
-                completionHandler(nil, error)
+                completionHandler(nil, FileProviderErrorMapper.map(error))
             }
         }
         return progress
@@ -97,7 +97,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 let item = FileProviderItem(from: metadata, isDownloaded: true)
                 completionHandler(localURL, item, nil)
             } catch {
-                completionHandler(nil, nil, error)
+                completionHandler(nil, nil, FileProviderErrorMapper.map(error))
             }
         }
 
@@ -179,7 +179,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 let newItem = FileProviderItem(from: metadata, isDownloaded: isDir || url != nil)
                 completionHandler(newItem, fields, false, nil)
             } catch {
-                completionHandler(nil, [], false, error)
+                completionHandler(nil, [], false, FileProviderErrorMapper.map(error))
             }
         }
 
@@ -282,7 +282,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 let updatedItem = FileProviderItem(from: metadata, isDownloaded: true)
                 completionHandler(updatedItem, [], false, nil)
             } catch {
-                completionHandler(nil, [], false, error)
+                completionHandler(nil, [], false, FileProviderErrorMapper.map(error))
             }
         }
 
@@ -340,7 +340,7 @@ public final class FileProviderExtension: NSObject, NSFileProviderReplicatedExte
                 self.metadataStore.markDeleted(domainIdentifier: self.domain.identifier.rawValue, itemIdentifier: identifier.rawValue)
                 completionHandler(nil)
             } catch {
-                completionHandler(error)
+                completionHandler(FileProviderErrorMapper.map(error))
             }
         }
 

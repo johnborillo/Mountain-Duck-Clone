@@ -272,7 +272,11 @@ public final class AppViewModel: ObservableObject {
                 guard let nativeURL = try await FileProviderDomainCoordinator.userVisibleURL(profile: profile) else {
                     throw FileProviderDomainError.userVisibleURLUnavailable(profile.name)
                 }
-                NSWorkspace.shared.open(nativeURL)
+                // Ask Finder to reveal the File Provider root. Opening the URL
+                // directly makes LaunchServices treat the sandboxed host as the
+                // reader and can produce a misleading permission dialog even
+                // though Finder itself owns and can browse the domain.
+                NSWorkspace.shared.activateFileViewerSelecting([nativeURL])
             } catch {
                 statusMessage = "❌ Could not open Finder location: \(FileProviderDomainCoordinator.diagnosticDescription(for: error))"
             }

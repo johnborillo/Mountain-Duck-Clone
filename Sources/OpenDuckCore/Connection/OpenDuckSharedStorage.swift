@@ -17,10 +17,16 @@ public enum OpenDuckSharedStorageError: Error, LocalizedError, Sendable {
 /// and tests may fall back to Application Support, but a production File Provider
 /// registration fails closed instead of silently creating split state.
 public enum OpenDuckSharedStorage {
-    public static let appGroupIdentifier = "group.com.openduck"
+    public static var appGroupIdentifier: String {
+        Bundle.main.object(forInfoDictionaryKey: "OpenDuckAppGroupIdentifier") as? String
+            ?? "group.com.openduck"
+    }
     public static let hostBundleIdentifier = "com.openduck.app"
     public static let extensionBundleIdentifier = "com.openduck.app.fileprovider"
-    public static let keychainAccessGroup = appGroupIdentifier
+    public static var keychainAccessGroup: String {
+        Bundle.main.object(forInfoDictionaryKey: "OpenDuckKeychainAccessGroup") as? String
+            ?? appGroupIdentifier
+    }
 
     public static var isBundledOpenDuckProcess: Bool {
         guard let identifier = Bundle.main.bundleIdentifier else { return false }

@@ -6,7 +6,25 @@ BUILD_DIR="$PROJECT_ROOT/build"
 APP_BUNDLE="$BUILD_DIR/OpenDuck.app"
 APPEX_BUNDLE="$APP_BUNDLE/Contents/PlugIns/OpenDuckFileProvider.appex"
 SIGNING_IDENTITY="${OPENDUCK_SIGNING_IDENTITY:--}"
+TEAM_IDENTIFIER="${OPENDUCK_TEAM_IDENTIFIER:-}"
+APP_GROUP_IDENTIFIER="${OPENDUCK_APP_GROUP_IDENTIFIER:-}"
+KEYCHAIN_ACCESS_GROUP="${OPENDUCK_KEYCHAIN_ACCESS_GROUP:-}"
 SIGNING_ENTITLEMENTS_DIR=""
+
+if [ "$SIGNING_IDENTITY" = "-" ]; then
+    APP_GROUP_IDENTIFIER="${APP_GROUP_IDENTIFIER:-group.com.openduck}"
+else
+    if ! [[ "$TEAM_IDENTIFIER" =~ ^[A-Z0-9]+$ ]]; then
+        echo "❌ OPENDUCK_TEAM_IDENTIFIER must be the uppercase Apple team identifier for the selected signing identity."
+        exit 1
+    fi
+    # This macOS-only form needs no App Group provisioning profile. A release
+    # may instead pass a registered group.* identifier explicitly.
+    APP_GROUP_IDENTIFIER="${APP_GROUP_IDENTIFIER:-$TEAM_IDENTIFIER.com.openduck}"
+    if [ -z "$KEYCHAIN_ACCESS_GROUP" ] && [[ "$APP_GROUP_IDENTIFIER" == group.* ]]; then
+        KEYCHAIN_ACCESS_GROUP="$APP_GROUP_IDENTIFIER"
+    fi
+fi
 
 cleanup() {
     if [ -n "$SIGNING_ENTITLEMENTS_DIR" ] && [ -d "$SIGNING_ENTITLEMENTS_DIR" ]; then
@@ -87,6 +105,8 @@ cat << 'PLIST' > "$APP_BUNDLE/Contents/Info.plist"
 </plist>
 PLIST
 
+/usr/libexec/PlistBuddy -c "Add :OpenDuckAppGroupIdentifier string '$APP_GROUP_IDENTIFIER'" "$APP_BUNDLE/Contents/Info.plist"
+
 # 3. Generate File Provider Extension Info.plist
 cat << 'PLIST' > "$APPEX_BUNDLE/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -139,22 +159,41 @@ cat << 'PLIST' > "$APPEX_BUNDLE/Contents/Info.plist"
 </plist>
 PLIST
 
+/usr/libexec/PlistBuddy -c "Set :NSExtension:NSExtensionFileProviderDocumentGroup '$APP_GROUP_IDENTIFIER'" "$APPEX_BUNDLE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :OpenDuckAppGroupIdentifier string '$APP_GROUP_IDENTIFIER'" "$APPEX_BUNDLE/Contents/Info.plist"
+if [ -n "$KEYCHAIN_ACCESS_GROUP" ]; then
+    /usr/libexec/PlistBuddy -c "Add :OpenDuckKeychainAccessGroup string '$KEYCHAIN_ACCESS_GROUP'" "$APP_BUNDLE/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Add :OpenDuckKeychainAccessGroup string '$KEYCHAIN_ACCESS_GROUP'" "$APPEX_BUNDLE/Contents/Info.plist"
+fi
+
 # 4. Sign the bundles
 echo "🔏 Code-signing bundles..."
-APP_ENTITLEMENTS="$PROJECT_ROOT/scripts/App.entitlements"
-EXTENSION_ENTITLEMENTS="$PROJECT_ROOT/scripts/Extension.entitlements"
+SIGNING_ENTITLEMENTS_DIR="$(mktemp -d)"
+APP_ENTITLEMENTS="$SIGNING_ENTITLEMENTS_DIR/App.entitlements"
+EXTENSION_ENTITLEMENTS="$SIGNING_ENTITLEMENTS_DIR/Extension.entitlements"
+cp "$PROJECT_ROOT/scripts/App.entitlements" "$APP_ENTITLEMENTS"
+cp "$PROJECT_ROOT/scripts/Extension.entitlements" "$EXTENSION_ENTITLEMENTS"
+/usr/libexec/PlistBuddy -c "Set :com.apple.security.application-groups:0 '$APP_GROUP_IDENTIFIER'" "$APP_ENTITLEMENTS"
+/usr/libexec/PlistBuddy -c "Set :com.apple.security.application-groups:0 '$APP_GROUP_IDENTIFIER'" "$EXTENSION_ENTITLEMENTS"
 if [ "$SIGNING_IDENTITY" = "-" ]; then
     # keychain-access-groups is restricted and makes an ad-hoc bundle fail AMFI
     # validation. Keep it in the canonical production entitlements, but omit it
     # for local builds; runtime capability detection then uses process-private
     # Keychain storage without pretending the extension can read it.
-    SIGNING_ENTITLEMENTS_DIR="$(mktemp -d)"
-    APP_ENTITLEMENTS="$SIGNING_ENTITLEMENTS_DIR/App.entitlements"
-    EXTENSION_ENTITLEMENTS="$SIGNING_ENTITLEMENTS_DIR/Extension.entitlements"
-    cp "$PROJECT_ROOT/scripts/App.entitlements" "$APP_ENTITLEMENTS"
-    cp "$PROJECT_ROOT/scripts/Extension.entitlements" "$EXTENSION_ENTITLEMENTS"
     /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$APP_ENTITLEMENTS"
     /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$EXTENSION_ENTITLEMENTS"
+else
+    /usr/libexec/PlistBuddy -c "Set :com.apple.application-identifier '$TEAM_IDENTIFIER.com.openduck.app'" "$APP_ENTITLEMENTS"
+    /usr/libexec/PlistBuddy -c "Set :com.apple.application-identifier '$TEAM_IDENTIFIER.com.openduck.app.fileprovider'" "$EXTENSION_ENTITLEMENTS"
+    /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string '$TEAM_IDENTIFIER'" "$APP_ENTITLEMENTS"
+    /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string '$TEAM_IDENTIFIER'" "$EXTENSION_ENTITLEMENTS"
+    if [ -n "$KEYCHAIN_ACCESS_GROUP" ]; then
+        /usr/libexec/PlistBuddy -c "Set :keychain-access-groups:0 '$KEYCHAIN_ACCESS_GROUP'" "$APP_ENTITLEMENTS"
+        /usr/libexec/PlistBuddy -c "Set :keychain-access-groups:0 '$KEYCHAIN_ACCESS_GROUP'" "$EXTENSION_ENTITLEMENTS"
+    else
+        /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$APP_ENTITLEMENTS"
+        /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$EXTENSION_ENTITLEMENTS"
+    fi
 fi
 
 codesign --force --sign "$SIGNING_IDENTITY" --entitlements "$EXTENSION_ENTITLEMENTS" "$APPEX_BUNDLE"
@@ -170,3 +209,7 @@ cp -R "$APP_BUNDLE" "/Applications/OpenDuck.app"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/OpenDuck.app"
 
 echo "✓ OpenDuck.app installed to /Applications!"
+if [ "$SIGNING_IDENTITY" = "-" ]; then
+    echo "⚠️  Ad-hoc signing cannot authorize a shared App Group for a File Provider extension."
+    echo "   Finder registration can be inspected, but enumeration requires OPENDUCK_SIGNING_IDENTITY and OPENDUCK_TEAM_IDENTIFIER."
+fi

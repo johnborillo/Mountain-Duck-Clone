@@ -78,6 +78,7 @@ func runAllTests() async throws {
     let sharedAccessTests = SharedAccessTests()
     await runTest("SharedAccessTests.testSSHBookmarkMetadataUsesSharedStoreAndDeletesCleanly") { sharedAccessTests.testSSHBookmarkMetadataUsesSharedStoreAndDeletesCleanly() }
     await runTest("SharedAccessTests.testRegistrationDiagnosticsIncludeNestedErrorCodes") { sharedAccessTests.testRegistrationDiagnosticsIncludeNestedErrorCodes() }
+    await runTest("SharedAccessTests.testAdapterErrorsAreMappedToSupportedFileProviderErrors") { sharedAccessTests.testAdapterErrorsAreMappedToSupportedFileProviderErrors() }
 
     // CircuitBreakerTests
     let breakerTests = CircuitBreakerTests()
