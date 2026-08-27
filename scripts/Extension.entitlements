@@ -14,5 +14,9 @@
     <array>
         <string>group.com.openduck</string>
     </array>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>group.com.openduck</string>
+    </array>
 </dict>
 </plist>

@@ -212,15 +212,14 @@ public struct MenuBarView: View {
 
     @ViewBuilder
     private func connectionCard(for profile: ServerProfile) -> some View {
-        let isMounted = viewModel.mountedDomainIDs.contains(profile.id)
         let isFinderRegistered = viewModel.registeredDomainIDs.contains(profile.id)
 
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 // Protocol Icon
-                Image(systemName: isMounted ? "externaldrive.fill.badge.checkmark" : "externaldrive")
+                Image(systemName: isFinderRegistered ? "externaldrive.fill.badge.checkmark" : "externaldrive")
                     .font(.title3)
-                    .foregroundColor(isMounted ? .green : .secondary)
+                    .foregroundColor(isFinderRegistered ? .green : .secondary)
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
@@ -243,28 +242,21 @@ public struct MenuBarView: View {
 
                 Spacer()
 
-                // Mount / Unmount Toggle Button
+                // Native Finder domain toggle. The old sparse-image `/Volumes`
+                // mirror is intentionally not exposed as a second mount mode.
                 Button(action: {
-                    viewModel.toggleMount(for: profile)
+                    viewModel.toggleFinderDomain(for: profile)
                 }) {
-                    Text(isMounted ? "Unmount Legacy" : "Legacy Mirror")
+                    Text(isFinderRegistered ? "Remove" : "Add to Finder")
                         .font(.caption).bold()
                 }
                 .buttonStyle(.bordered)
-                .tint(isMounted ? .red : .accentColor)
+                .tint(isFinderRegistered ? .red : .accentColor)
                 .disabled(viewModel.isMounting)
             }
 
             // Secondary Action Row (Available in both mounted & unmounted states)
             HStack(spacing: 12) {
-                Button(action: {
-                    viewModel.toggleFinderDomain(for: profile)
-                }) {
-                    Label(isFinderRegistered ? "Remove from Finder" : "Add to Finder", systemImage: isFinderRegistered ? "sidebar.left" : "finder")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-
                 if isFinderRegistered {
                     Button(action: {
                         viewModel.openInFinder(for: profile)
@@ -273,27 +265,10 @@ public struct MenuBarView: View {
                             .font(.caption)
                     }
                     .buttonStyle(.borderless)
-                }
-
-                if isMounted {
-                    Button(action: {
-                        Task { await viewModel.syncVolume(profile: profile) }
-                    }) {
-                        Label("Sync", systemImage: "arrow.clockwise")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.borderless)
-
-                    if viewModel.isCircuitBreakerTripped(for: profile) {
-                        Button(action: {
-                            viewModel.resetCircuitBreaker(for: profile)
-                        }) {
-                            Label("Reset Shield", systemImage: "shield.slash")
-                                .font(.caption)
-                                .foregroundColor(.orange)
-                        }
-                        .buttonStyle(.borderless)
-                    }
+                } else {
+                    Label("Not in Finder", systemImage: "icloud.slash")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
 
                 Spacer()

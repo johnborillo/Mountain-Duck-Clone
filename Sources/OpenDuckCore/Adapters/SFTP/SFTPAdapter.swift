@@ -8,6 +8,7 @@ import Crypto
 public enum SFTPAuthMethod: Sendable {
     case password(String)
     case privateKey(keyPath: String, passphrase: String?)
+    case privateKeyData(Data, passphrase: String?)
 }
 
 /// Configuration parameters for an SFTP remote endpoint.
@@ -65,23 +66,23 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             authMethod = .passwordBased(username: configuration.username, password: password)
         case .privateKey(let keyPath, let passphrase):
             let expandedPath = NSString(string: keyPath).expandingTildeInPath
-            guard let keyData = try? Data(contentsOf: URL(fileURLWithPath: expandedPath)) else {
+            let keyData: Data
+            do {
+                keyData = try Data(contentsOf: URL(fileURLWithPath: expandedPath), options: .mappedIfSafe)
+            } catch {
                 throw AdapterError.authenticationFailed("Could not read SSH private key file at '\(expandedPath)'")
             }
-            if let keyString = String(data: keyData, encoding: .utf8) {
-                let decKey = passphrase?.data(using: .utf8)
-                if let privKey = try? Curve25519.Signing.PrivateKey(sshEd25519: keyString, decryptionKey: decKey) {
-                    authMethod = .ed25519(username: configuration.username, privateKey: privKey)
-                } else if let rsaKey = try? Insecure.RSA.PrivateKey(sshRsa: keyString, decryptionKey: decKey) {
-                    authMethod = .rsa(username: configuration.username, privateKey: rsaKey)
-                } else if let rawKey = try? Curve25519.Signing.PrivateKey(rawRepresentation: keyData) {
-                    authMethod = .ed25519(username: configuration.username, privateKey: rawKey)
-                } else {
-                    throw AdapterError.authenticationFailed("Failed to parse or decrypt private key at '\(expandedPath)'. If passphrase-protected, ensure the correct passphrase is provided.")
-                }
-            } else {
-                throw AdapterError.authenticationFailed("Invalid private key format at '\(expandedPath)'")
-            }
+            authMethod = try parsePrivateKey(
+                keyData,
+                passphrase: passphrase,
+                sourceDescription: expandedPath
+            )
+        case .privateKeyData(let keyData, let passphrase):
+            authMethod = try parsePrivateKey(
+                keyData,
+                passphrase: passphrase,
+                sourceDescription: "the key selected in OpenDuck"
+            )
         }
 
         let validator = OpenDuckHostKeyValidator(
@@ -112,6 +113,34 @@ public final class SFTPAdapter: RemoteFilesystemAdapter, @unchecked Sendable {
             }
             throw AdapterError.authenticationFailed("SFTP connection failed: \(error.localizedDescription)")
         }
+    }
+
+    private func parsePrivateKey(
+        _ keyData: Data,
+        passphrase: String?,
+        sourceDescription: String
+    ) throws -> SSHAuthenticationMethod {
+        let decryptionKey = passphrase?.data(using: .utf8)
+        if let keyString = String(data: keyData, encoding: .utf8) {
+            if let privateKey = try? Curve25519.Signing.PrivateKey(
+                sshEd25519: keyString,
+                decryptionKey: decryptionKey
+            ) {
+                return .ed25519(username: configuration.username, privateKey: privateKey)
+            }
+            if let privateKey = try? Insecure.RSA.PrivateKey(
+                sshRsa: keyString,
+                decryptionKey: decryptionKey
+            ) {
+                return .rsa(username: configuration.username, privateKey: privateKey)
+            }
+        }
+        if let privateKey = try? Curve25519.Signing.PrivateKey(rawRepresentation: keyData) {
+            return .ed25519(username: configuration.username, privateKey: privateKey)
+        }
+        throw AdapterError.authenticationFailed(
+            "Failed to parse or decrypt \(sourceDescription). If the key is encrypted, verify its passphrase."
+        )
     }
 
     public func disconnect() async {

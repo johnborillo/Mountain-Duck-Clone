@@ -736,12 +736,13 @@ public final class WatcherContext: @unchecked Sendable {
             }?.offset
         }
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: localPath),
-              let size = attrs[.size] as? Int64 else {
+              let sizeNumber = attrs[.size] as? NSNumber else {
             // Can't stat the arrival; fall back to basename.
             return candidates.first { _, dep in
                 (dep.localPath as NSString).lastPathComponent == name
             }?.offset
         }
+        let size = sizeNumber.int64Value
         // Prefer exact (size, mtime); accept size + basename; then basename alone.
         let mtime = attrs[.modificationDate] as? Date
         if let m = mtime,
