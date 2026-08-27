@@ -183,14 +183,21 @@ if [ "$SIGNING_IDENTITY" = "-" ]; then
     /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$APP_ENTITLEMENTS"
     /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$EXTENSION_ENTITLEMENTS"
 else
-    /usr/libexec/PlistBuddy -c "Set :com.apple.application-identifier '$TEAM_IDENTIFIER.com.openduck.app'" "$APP_ENTITLEMENTS"
-    /usr/libexec/PlistBuddy -c "Set :com.apple.application-identifier '$TEAM_IDENTIFIER.com.openduck.app.fileprovider'" "$EXTENSION_ENTITLEMENTS"
-    /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string '$TEAM_IDENTIFIER'" "$APP_ENTITLEMENTS"
-    /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string '$TEAM_IDENTIFIER'" "$EXTENSION_ENTITLEMENTS"
     if [ -n "$KEYCHAIN_ACCESS_GROUP" ]; then
+        # Restricted Keychain sharing must be paired with provisioning that
+        # authorizes these Xcode-generated identity entitlements.
+        /usr/libexec/PlistBuddy -c "Set :com.apple.application-identifier '$TEAM_IDENTIFIER.com.openduck.app'" "$APP_ENTITLEMENTS"
+        /usr/libexec/PlistBuddy -c "Set :com.apple.application-identifier '$TEAM_IDENTIFIER.com.openduck.app.fileprovider'" "$EXTENSION_ENTITLEMENTS"
+        /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string '$TEAM_IDENTIFIER'" "$APP_ENTITLEMENTS"
+        /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string '$TEAM_IDENTIFIER'" "$EXTENSION_ENTITLEMENTS"
         /usr/libexec/PlistBuddy -c "Set :keychain-access-groups:0 '$KEYCHAIN_ACCESS_GROUP'" "$APP_ENTITLEMENTS"
         /usr/libexec/PlistBuddy -c "Set :keychain-access-groups:0 '$KEYCHAIN_ACCESS_GROUP'" "$EXTENSION_ENTITLEMENTS"
     else
+        # For the macOS team-prefixed App Group mode, the signing certificate's
+        # TeamIdentifier is sufficient. Claiming application/team entitlements
+        # without a provisioning profile causes AMFI to reject the processes.
+        /usr/libexec/PlistBuddy -c "Delete :com.apple.application-identifier" "$APP_ENTITLEMENTS"
+        /usr/libexec/PlistBuddy -c "Delete :com.apple.application-identifier" "$EXTENSION_ENTITLEMENTS"
         /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$APP_ENTITLEMENTS"
         /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$EXTENSION_ENTITLEMENTS"
     fi
