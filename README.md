@@ -15,7 +15,7 @@ OpenDuck presents remote endpoints in Finder through the native replicated File 
 - 🗂️ **Native File Provider domains:** Each profile has a stable UUID-backed domain under Finder's Cloud Storage locations. Finder owns placeholders, materialization, and eviction; OpenDuck owns remote state and mutations.
 - 🦆 **One Finder workflow:** The menu-bar app only registers native Finder domains. The experimental sparse-image `/Volumes` mirror remains internal test code and cannot be mistaken for a production mount.
 - 🚀 **Native Citadel SFTP Engine:** In-process, SwiftNIO SSH multiplexed transport. Zero subprocess shell-outs, zero batch-script injection risk, and full support for encrypted Ed25519/RSA SSH private keys and passwords.
-- 🔑 **Persistent sandbox-safe authentication:** Passwords and passphrases use a shared Keychain access group. SSH key files remain in place and are reopened by the File Provider extension through a read-only security-scoped bookmark.
+- 🔑 **Persistent sandbox-safe authentication:** Passwords and passphrases use a shared Keychain access group. When the user explicitly selects an SSH key, OpenDuck imports a protected copy into its private App Group with owner-only permissions (`0600`) and excludes it from backups so the separate File Provider process can authenticate without broad filesystem access.
 - 🔑 **Trust-On-First-Use (TOFU) Key Pinning:** Strict SHA-256 host key fingerprints stored in an isolated database and validated on every connection against OpenSSH `ssh-keygen -lf` standard format to prevent Man-In-The-Middle (MITM) attacks.
 - 🗄️ **Persistent SQLite WAL Engine:** Transactional metadata database (`MetadataDatabase.sqlite`) tracking placeholder, materialized, dirty, and uploading states across restarts and crashes.
 - 🧭 **Root confinement and stable versions:** Remote paths are canonicalized and rejected when they escape the configured root. File Provider versions use remote fingerprints so stale Finder edits become visible conflicts instead of silent overwrites.
@@ -30,7 +30,7 @@ OpenDuck presents remote endpoints in Finder through the native replicated File 
   5. *Zero-Byte Overwrite Barrier* preventing placeholder stubs from wiping remote files.
   6. *Dual-Window Mass Deletion Circuit Breaker* halting automated operations if $>10$ deletions/sec (burst) or $>50$ deletions/60sec (sustained) occur.
 - 💾 **Decoupled LRU Cache Engine:** Cache storage resides strictly outside `/Volumes/` to prevent local evictions from emitting FSEvents deletes, with automatic write-back preservation for unuploaded dirty edits.
-- 🔒 **Zero Plaintext Secrets:** Passwords and SSH key passphrases are stored in macOS Keychain via `Security.framework`.
+- 🔒 **Keychain-protected secrets:** Passwords and SSH-key passphrases are stored in macOS Keychain via `Security.framework`; imported private-key files are isolated in the App Group with owner-only permissions and excluded from backups.
 
 ---
 
@@ -71,7 +71,7 @@ OPENDUCK_TEAM_IDENTIFIER="TEAMID" \
 
 For local macOS development the script defaults to the unprovisioned `TEAMID.com.openduck` App Group form supported by macOS. Password authentication and encrypted-key passphrases additionally require a provisioned shared Keychain group passed as `OPENDUCK_KEYCHAIN_ACCESS_GROUP`; an unencrypted SSH key selected with **Browse** needs no shared secret. A distributable release still needs a canonical Xcode project, provisioning, hardened runtime, notarization, and release signing.
 
-After upgrading from an earlier build, OpenDuck automatically recreates only its broken local Finder domain records; remote SFTP data and the durable OpenDuck operation journal are not deleted. Existing SSH-key profiles must be edited once so the key can be selected with **Browse** and macOS can issue persistent read permission to the extension.
+After upgrading from an earlier build, OpenDuck automatically recreates only its broken local Finder domain records; remote SFTP data and the durable OpenDuck operation journal are not deleted. OpenDuck migrates usable host bookmarks into protected shared key copies automatically. If an older bookmark belongs to a different signing identity, edit the profile once and select the key with **Browse** again.
 
 ---
 

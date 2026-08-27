@@ -22,6 +22,41 @@ final class SharedAccessTests: XCTestCase {
         XCTAssertFalse(store.hasBookmark(for: profileID))
     }
 
+    func testImportedSSHKeyUsesOwnerOnlyStorageAndDeletesCleanly() throws {
+        let suiteName = "com.openduck.tests.imported-keys.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("openduck-imported-keys-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = SSHKeyBookmarkStore(
+            userDefaults: defaults,
+            keyMaterialDirectory: directory
+        )
+        let profileID = UUID()
+        let keyData = Data("test-private-key".utf8)
+
+        // The File Provider must prefer shared material instead of trying to
+        // resolve a host-process bookmark.
+        store.saveBookmark(Data([0x01, 0x02, 0x03]), for: profileID)
+        try store.importPrivateKeyData(keyData, for: profileID)
+        XCTAssertTrue(store.hasImportedPrivateKey(for: profileID))
+        XCTAssertEqual(try store.loadPrivateKeyData(for: profileID), keyData)
+
+        let keyURL = directory.appendingPathComponent("\(profileID.uuidString).key")
+        let attributes = try FileManager.default.attributesOfItem(atPath: keyURL.path)
+        let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue
+        XCTAssertEqual(permissions, 0o600)
+
+        store.deleteBookmark(for: profileID)
+        XCTAssertFalse(store.hasImportedPrivateKey(for: profileID))
+    }
+
     func testRegistrationDiagnosticsIncludeNestedErrorCodes() {
         let underlying = NSError(
             domain: NSCocoaErrorDomain,

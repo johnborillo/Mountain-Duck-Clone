@@ -77,6 +77,7 @@ func runAllTests() async throws {
     // SharedAccessTests
     let sharedAccessTests = SharedAccessTests()
     await runTest("SharedAccessTests.testSSHBookmarkMetadataUsesSharedStoreAndDeletesCleanly") { sharedAccessTests.testSSHBookmarkMetadataUsesSharedStoreAndDeletesCleanly() }
+    await runTest("SharedAccessTests.testImportedSSHKeyUsesOwnerOnlyStorageAndDeletesCleanly") { try sharedAccessTests.testImportedSSHKeyUsesOwnerOnlyStorageAndDeletesCleanly() }
     await runTest("SharedAccessTests.testRegistrationDiagnosticsIncludeNestedErrorCodes") { sharedAccessTests.testRegistrationDiagnosticsIncludeNestedErrorCodes() }
     await runTest("SharedAccessTests.testAdapterErrorsAreMappedToSupportedFileProviderErrors") { sharedAccessTests.testAdapterErrorsAreMappedToSupportedFileProviderErrors() }
 

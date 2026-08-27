@@ -62,6 +62,7 @@ public final class AppViewModel: ObservableObject {
         refreshMountedVolumes()
         refreshRegisteredDomains()
         migrateLegacyCredentials()
+        migrateLegacySSHKeyAccess()
         repairLegacyFinderDomainsIfNeeded()
     }
 
@@ -72,11 +73,20 @@ public final class AppViewModel: ObservableObject {
     public func addProfile(
         _ profile: ServerProfile,
         secret: String?,
-        privateKeyBookmark: Data? = nil
+        privateKeyBookmark: Data? = nil,
+        privateKeyData: Data? = nil
     ) {
-        connectionManager.registerProfile(profile)
-        if let privateKeyBookmark {
-            connectionManager.savePrivateKeyBookmark(privateKeyBookmark, for: profile.id)
+        if let privateKeyBookmark, let privateKeyData {
+            do {
+                try connectionManager.savePrivateKeyAccess(
+                    bookmark: privateKeyBookmark,
+                    keyData: privateKeyData,
+                    for: profile.id
+                )
+            } catch {
+                statusMessage = "❌ \(error.localizedDescription)"
+                return
+            }
         }
         if let secret = secret, !secret.isEmpty {
             do {
@@ -90,6 +100,7 @@ public final class AppViewModel: ObservableObject {
                 return
             }
         }
+        connectionManager.registerProfile(profile)
         loadProfiles()
         currentScreen = .main
         statusMessage = "Profile '\(profile.name)' created."
@@ -430,11 +441,21 @@ public final class AppViewModel: ObservableObject {
     public func updateProfile(
         _ profile: ServerProfile,
         secret: String?,
-        privateKeyBookmark: Data? = nil
+        privateKeyBookmark: Data? = nil,
+        privateKeyData: Data? = nil
     ) {
         let wasRegistered = registeredDomainIDs.contains(profile.id)
-        if let privateKeyBookmark {
-            connectionManager.savePrivateKeyBookmark(privateKeyBookmark, for: profile.id)
+        if let privateKeyBookmark, let privateKeyData {
+            do {
+                try connectionManager.savePrivateKeyAccess(
+                    bookmark: privateKeyBookmark,
+                    keyData: privateKeyData,
+                    for: profile.id
+                )
+            } catch {
+                statusMessage = "❌ \(error.localizedDescription)"
+                return
+            }
         }
         if let secret, !secret.isEmpty {
             do {
@@ -455,6 +476,23 @@ public final class AppViewModel: ObservableObject {
         statusMessage = "✓ Profile '\(profile.name)' updated."
         if wasRegistered {
             Task { await registerFinderDomain(for: profile) }
+        }
+    }
+
+    private func migrateLegacySSHKeyAccess() {
+        var migrated = 0
+        for profile in connectionManager.allProfiles() where profile.authType == .sshKey {
+            do {
+                if try connectionManager.keyBookmarks.migrateBookmarkToImportedKey(for: profile.id) {
+                    migrated += 1
+                }
+            } catch {
+                // Old ad-hoc bookmarks cannot be recovered by a newly signed
+                // app. The edit screen explains the one-time Browse action.
+            }
+        }
+        if migrated > 0 {
+            statusMessage = "✓ Imported \(migrated) SSH key\(migrated == 1 ? "" : "s") for Finder access."
         }
     }
 

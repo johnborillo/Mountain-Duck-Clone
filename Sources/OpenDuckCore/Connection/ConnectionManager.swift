@@ -88,6 +88,15 @@ public final class ConnectionManager: @unchecked Sendable {
         keyBookmarks.saveBookmark(bookmark, for: profileID)
     }
 
+    public func savePrivateKeyAccess(
+        bookmark: Data,
+        keyData: Data,
+        for profileID: UUID
+    ) throws {
+        try keyBookmarks.importPrivateKeyData(keyData, for: profileID)
+        keyBookmarks.saveBookmark(bookmark, for: profileID)
+    }
+
     public func hasPrivateKeyBookmark(for profileID: UUID) -> Bool {
         keyBookmarks.hasBookmark(for: profileID)
     }
