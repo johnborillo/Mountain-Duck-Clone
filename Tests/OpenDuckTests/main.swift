@@ -74,6 +74,11 @@ func runAllTests() async throws {
     await runTest("ConnectionManagerTests.testProfileRegistrationAndRetrieval") { connTests.testProfileRegistrationAndRetrieval() }
     await runTest("ConnectionManagerTests.testMockConnectionLifecycle") { try await connTests.testMockConnectionLifecycle() }
 
+    // SharedAccessTests
+    let sharedAccessTests = SharedAccessTests()
+    await runTest("SharedAccessTests.testSSHBookmarkMetadataUsesSharedStoreAndDeletesCleanly") { sharedAccessTests.testSSHBookmarkMetadataUsesSharedStoreAndDeletesCleanly() }
+    await runTest("SharedAccessTests.testRegistrationDiagnosticsIncludeNestedErrorCodes") { sharedAccessTests.testRegistrationDiagnosticsIncludeNestedErrorCodes() }
+
     // CircuitBreakerTests
     let breakerTests = CircuitBreakerTests()
     try breakerTests.setUpWithError()

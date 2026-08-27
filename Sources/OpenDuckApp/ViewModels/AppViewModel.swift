@@ -32,6 +32,8 @@ public final class AppViewModel: ObservableObject {
     public let volumeManager: VolumeMountManager
     private var timer: Timer?
     private var lastRemoteSignal = Date.distantPast
+    private let finderDomainSchemaKey = "com.openduck.finderDomainSchemaVersion"
+    private let currentFinderDomainSchemaVersion = 3
 
     public init(
         connectionManager: ConnectionManager = .shared,
@@ -59,16 +61,34 @@ public final class AppViewModel: ObservableObject {
         refreshOperationalState()
         refreshMountedVolumes()
         refreshRegisteredDomains()
+        migrateLegacyCredentials()
+        repairLegacyFinderDomainsIfNeeded()
     }
 
     public func loadProfiles() {
         self.profiles = connectionManager.allProfiles()
     }
 
-    public func addProfile(_ profile: ServerProfile, secret: String?) {
+    public func addProfile(
+        _ profile: ServerProfile,
+        secret: String?,
+        privateKeyBookmark: Data? = nil
+    ) {
         connectionManager.registerProfile(profile)
+        if let privateKeyBookmark {
+            connectionManager.savePrivateKeyBookmark(privateKeyBookmark, for: profile.id)
+        }
         if let secret = secret, !secret.isEmpty {
-            connectionManager.keychain.saveSecret(secret, for: profile.id, account: profile.username)
+            do {
+                try connectionManager.keychain.saveSecretOrThrow(
+                    secret,
+                    for: profile.id,
+                    account: profile.username
+                )
+            } catch {
+                statusMessage = "❌ \(error.localizedDescription)"
+                return
+            }
         }
         loadProfiles()
         currentScreen = .main
@@ -116,12 +136,14 @@ public final class AppViewModel: ObservableObject {
     @discardableResult
     public func registerFinderDomain(for profile: ServerProfile) async -> Bool {
         do {
-            try await FileProviderDomainCoordinator.register(profile: profile)
+            let result = try await FileProviderDomainCoordinator.register(profile: profile)
             registeredDomainIDs.insert(profile.id)
-            statusMessage = "✓ Added '\(profile.name)' to Finder."
+            statusMessage = result.repairedLegacyDomain
+                ? "✓ Repaired and added '\(profile.name)' to Finder."
+                : "✓ Added '\(profile.name)' to Finder."
             return true
         } catch {
-            statusMessage = "❌ Finder registration failed: \(error.localizedDescription)"
+            statusMessage = "❌ Finder registration failed: \(FileProviderDomainCoordinator.diagnosticDescription(for: error))"
             return false
         }
     }
@@ -134,7 +156,7 @@ public final class AppViewModel: ObservableObject {
             statusMessage = "Removed '\(profile.name)' from Finder."
             return true
         } catch {
-            statusMessage = "❌ Finder removal failed: \(error.localizedDescription)"
+            statusMessage = "❌ Finder removal failed: \(FileProviderDomainCoordinator.diagnosticDescription(for: error))"
             return false
         }
     }
@@ -241,20 +263,18 @@ public final class AppViewModel: ObservableObject {
 
     public func openInFinder(for profile: ServerProfile) {
         Task { @MainActor in
-            if registeredDomainIDs.contains(profile.id) {
-                do {
-                    if let nativeURL = try await FileProviderDomainCoordinator.userVisibleURL(profile: profile) {
-                        NSWorkspace.shared.open(nativeURL)
-                        return
-                    }
-                } catch { /* fall back to the legacy mirror below */ }
+            guard registeredDomainIDs.contains(profile.id) else {
+                _ = await registerFinderDomain(for: profile)
+                return
             }
 
-            let volumeURL = URL(fileURLWithPath: "/Volumes/\(profile.name)")
-            if FileManager.default.fileExists(atPath: volumeURL.path) {
-                NSWorkspace.shared.open(volumeURL)
-            } else {
-                await mount(profile: profile)
+            do {
+                guard let nativeURL = try await FileProviderDomainCoordinator.userVisibleURL(profile: profile) else {
+                    throw FileProviderDomainError.userVisibleURLUnavailable(profile.name)
+                }
+                NSWorkspace.shared.open(nativeURL)
+            } catch {
+                statusMessage = "❌ Could not open Finder location: \(FileProviderDomainCoordinator.diagnosticDescription(for: error))"
             }
         }
     }
@@ -403,9 +423,28 @@ public final class AppViewModel: ObservableObject {
         self.currentScreen = .addConnection
     }
 
-    public func updateProfile(_ profile: ServerProfile, secret: String?) {
+    public func updateProfile(
+        _ profile: ServerProfile,
+        secret: String?,
+        privateKeyBookmark: Data? = nil
+    ) {
         let wasRegistered = registeredDomainIDs.contains(profile.id)
-        connectionManager.updateProfile(profile, secret: secret)
+        if let privateKeyBookmark {
+            connectionManager.savePrivateKeyBookmark(privateKeyBookmark, for: profile.id)
+        }
+        if let secret, !secret.isEmpty {
+            do {
+                try connectionManager.keychain.saveSecretOrThrow(
+                    secret,
+                    for: profile.id,
+                    account: profile.username
+                )
+            } catch {
+                statusMessage = "❌ \(error.localizedDescription)"
+                return
+            }
+        }
+        connectionManager.updateProfile(profile, secret: nil)
         loadProfiles()
         self.editingProfile = nil
         self.currentScreen = .main
@@ -420,5 +459,35 @@ public final class AppViewModel: ObservableObject {
         volumeManager.cancelTransfer(remotePath: transfer.remotePath, localURL: localURL, deleteLocal: deleteItem)
         activeTransfers.removeAll { $0.id == transfer.id }
         statusMessage = deleteItem ? "✓ Transfer cancelled and file deleted." : "✓ Transfer cancelled."
+    }
+
+    private func migrateLegacyCredentials() {
+        do {
+            let migrated = try connectionManager.migrateLegacyCredentials()
+            if migrated > 0 {
+                statusMessage = "✓ Migrated \(migrated) credential\(migrated == 1 ? "" : "s") for Finder access."
+            }
+        } catch {
+            statusMessage = "❌ Credential migration failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func repairLegacyFinderDomainsIfNeeded() {
+        guard UserDefaults.standard.integer(forKey: finderDomainSchemaKey) < currentFinderDomainSchemaVersion else {
+            return
+        }
+
+        Task {
+            do {
+                let repaired = try await FileProviderDomainCoordinator.recreateRegisteredDomains(for: profiles)
+                UserDefaults.standard.set(currentFinderDomainSchemaVersion, forKey: finderDomainSchemaKey)
+                refreshRegisteredDomains()
+                if repaired > 0 {
+                    statusMessage = "✓ Repaired \(repaired) Finder connection\(repaired == 1 ? "" : "s") for native Cloud Storage."
+                }
+            } catch {
+                statusMessage = "❌ Finder repair failed: \(FileProviderDomainCoordinator.diagnosticDescription(for: error))"
+            }
+        }
     }
 }

@@ -15,6 +15,8 @@ public struct AddEditConnectionSheet: View {
     @State private var authType: AuthenticationType = .password
     @State private var passwordSecret: String = ""
     @State private var privateKeyPath: String = ""
+    @State private var privateKeyBookmark: Data? = nil
+    @State private var keySelectionError: String? = nil
     @State private var remoteRootPath: String = "/"
     @State private var autoConnect: Bool = false
     @State private var isReadOnly: Bool = true
@@ -160,12 +162,26 @@ public struct AddEditConnectionSheet: View {
                                             .font(.caption)
                                             .foregroundColor(.secondary)
                                         HStack {
-                                            TextField("~/.ssh/id_ed25519", text: $privateKeyPath)
+                                            TextField("Choose a private key with Browse", text: $privateKeyPath)
                                                 .textFieldStyle(.roundedBorder)
+                                                .disabled(true)
                                             Button("Browse...") {
                                                 browseKeyFile()
                                             }
                                             .buttonStyle(.bordered)
+                                        }
+                                        if let keySelectionError {
+                                            Text(keySelectionError)
+                                                .font(.caption2)
+                                                .foregroundColor(.red)
+                                        } else if privateKeyBookmark == nil {
+                                            Text("Choose the key with Browse so Finder keeps permission to read it after the app closes.")
+                                                .font(.caption2)
+                                                .foregroundColor(.orange)
+                                        } else {
+                                            Label("Persistent key access granted", systemImage: "checkmark.shield")
+                                                .font(.caption2)
+                                                .foregroundColor(.green)
                                         }
                                     }
 
@@ -213,7 +229,7 @@ public struct AddEditConnectionSheet: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
-                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(saveIsDisabled)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -234,6 +250,7 @@ public struct AddEditConnectionSheet: View {
         username = profile.username
         authType = profile.authType
         privateKeyPath = profile.privateKeyPath ?? ""
+        privateKeyBookmark = viewModel.connectionManager.keyBookmarks.bookmark(for: profile.id)
         remoteRootPath = profile.remoteRootPath
         autoConnect = profile.autoConnect
         isReadOnly = profile.isReadOnly
@@ -251,8 +268,23 @@ public struct AddEditConnectionSheet: View {
         panel.allowsMultipleSelection = false
 
         if panel.runModal() == .OK, let url = panel.url {
-            privateKeyPath = url.path
+            do {
+                privateKeyBookmark = try viewModel.connectionManager.keyBookmarks.makeBookmark(for: url)
+                privateKeyPath = url.path
+                keySelectionError = nil
+            } catch {
+                privateKeyBookmark = nil
+                keySelectionError = error.localizedDescription
+            }
         }
+    }
+
+    private var saveIsDisabled: Bool {
+        if name.trimmingCharacters(in: .whitespaces).isEmpty { return true }
+        if protocolType == .sftp && authType == .sshKey {
+            return privateKeyBookmark == nil
+        }
+        return false
     }
 
     private func saveProfile() {
@@ -273,7 +305,11 @@ public struct AddEditConnectionSheet: View {
                 createdAt: existing.createdAt,
                 lastConnectedAt: existing.lastConnectedAt
             )
-            viewModel.updateProfile(updated, secret: passwordSecret)
+            viewModel.updateProfile(
+                updated,
+                secret: passwordSecret,
+                privateKeyBookmark: privateKeyBookmark
+            )
         } else {
             let profile = ServerProfile(
                 name: name.isEmpty ? "Server (\(host))" : name,
@@ -287,7 +323,11 @@ public struct AddEditConnectionSheet: View {
                 autoConnect: autoConnect,
                 isReadOnly: isReadOnly
             )
-            viewModel.addProfile(profile, secret: passwordSecret)
+            viewModel.addProfile(
+                profile,
+                secret: passwordSecret,
+                privateKeyBookmark: privateKeyBookmark
+            )
         }
     }
 }

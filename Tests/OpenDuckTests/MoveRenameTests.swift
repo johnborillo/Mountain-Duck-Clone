@@ -289,4 +289,3 @@ final class MoveRenameTests: XCTestCase {
         XCTAssertTrue(adapter.deletedPaths.contains("/batch_delete.txt"), "Coalesced rename+remove must trigger delete")
     }
 }
-

@@ -5,6 +5,33 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$PROJECT_ROOT/build"
 APP_BUNDLE="$BUILD_DIR/OpenDuck.app"
 APPEX_BUNDLE="$APP_BUNDLE/Contents/PlugIns/OpenDuckFileProvider.appex"
+SIGNING_IDENTITY="${OPENDUCK_SIGNING_IDENTITY:--}"
+SIGNING_ENTITLEMENTS_DIR=""
+
+cleanup() {
+    if [ -n "$SIGNING_ENTITLEMENTS_DIR" ] && [ -d "$SIGNING_ENTITLEMENTS_DIR" ]; then
+        rm -rf "$SIGNING_ENTITLEMENTS_DIR"
+    fi
+}
+trap cleanup EXIT
+
+# A partially updated Command Line Tools install can contain a Swift compiler
+# and SDK whose patch-level swiftlang builds differ. Swift normally rejects the
+# SDK interfaces even though they are compatible. Detect that exact condition
+# and identify the SDK interface version to the frontend; normal installations
+# continue using swiftc directly.
+SDK_PATH="$(xcrun --show-sdk-path)"
+SDK_SWIFT_INTERFACE="$SDK_PATH/usr/lib/swift/Swift.swiftmodule/arm64e-apple-macos.swiftinterface"
+if [ -f "$SDK_SWIFT_INTERFACE" ]; then
+    TOOLCHAIN_SWIFTLANG="$(swift --version | sed -n 's/.*swiftlang-\([^ )]*\).*/\1/p' | head -1)"
+    SDK_SWIFTLANG="$(sed -n 's/.*swiftlang-\([^ )]*\).*/\1/p' "$SDK_SWIFT_INTERFACE" | head -1)"
+    if [ -n "$TOOLCHAIN_SWIFTLANG" ] && [ -n "$SDK_SWIFTLANG" ] && [ "$TOOLCHAIN_SWIFTLANG" != "$SDK_SWIFTLANG" ]; then
+        echo "ℹ️  Using SDK Swift interface compatibility mode ($TOOLCHAIN_SWIFTLANG -> $SDK_SWIFTLANG)."
+        export OPENDUCK_INTERFACE_COMPILER_VERSION="$SDK_SWIFTLANG"
+        export OPENDUCK_REAL_SWIFTC="$(xcrun --find swiftc)"
+        export SWIFT_EXEC="$PROJECT_ROOT/scripts/swiftc_compat.sh"
+    fi
+fi
 
 echo "🦆 Building OpenDuck release binaries..."
 cd "$PROJECT_ROOT"
@@ -47,9 +74,9 @@ cat << 'PLIST' > "$APP_BUNDLE/Contents/Info.plist"
         <string>MacOSX</string>
     </array>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.1.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>8</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
@@ -83,9 +110,9 @@ cat << 'PLIST' > "$APPEX_BUNDLE/Contents/Info.plist"
         <string>MacOSX</string>
     </array>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.1.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>8</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSExtension</key>
@@ -93,6 +120,11 @@ cat << 'PLIST' > "$APPEX_BUNDLE/Contents/Info.plist"
         <!-- fileproviderd reads this key directly from NSExtension. -->
         <key>NSExtensionFileProviderDocumentGroup</key>
         <string>group.com.openduck</string>
+        <!-- This switches fileproviderd to the replicated/enumerating API
+             implemented by FileProviderExtension. Without it macOS attempts
+             to load the class as the legacy NSFileProviderExtension API. -->
+        <key>NSExtensionFileProviderSupportsEnumeration</key>
+        <true/>
         <key>NSExtensionPointIdentifier</key>
         <string>com.apple.fileprovider-nonui</string>
         <key>NSExtensionPrincipalClass</key>
@@ -109,8 +141,25 @@ PLIST
 
 # 4. Sign the bundles
 echo "🔏 Code-signing bundles..."
-codesign --force --sign - --entitlements "$PROJECT_ROOT/scripts/Extension.entitlements" "$APPEX_BUNDLE"
-codesign --force --sign - --entitlements "$PROJECT_ROOT/scripts/App.entitlements" "$APP_BUNDLE"
+APP_ENTITLEMENTS="$PROJECT_ROOT/scripts/App.entitlements"
+EXTENSION_ENTITLEMENTS="$PROJECT_ROOT/scripts/Extension.entitlements"
+if [ "$SIGNING_IDENTITY" = "-" ]; then
+    # keychain-access-groups is restricted and makes an ad-hoc bundle fail AMFI
+    # validation. Keep it in the canonical production entitlements, but omit it
+    # for local builds; runtime capability detection then uses process-private
+    # Keychain storage without pretending the extension can read it.
+    SIGNING_ENTITLEMENTS_DIR="$(mktemp -d)"
+    APP_ENTITLEMENTS="$SIGNING_ENTITLEMENTS_DIR/App.entitlements"
+    EXTENSION_ENTITLEMENTS="$SIGNING_ENTITLEMENTS_DIR/Extension.entitlements"
+    cp "$PROJECT_ROOT/scripts/App.entitlements" "$APP_ENTITLEMENTS"
+    cp "$PROJECT_ROOT/scripts/Extension.entitlements" "$EXTENSION_ENTITLEMENTS"
+    /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$APP_ENTITLEMENTS"
+    /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$EXTENSION_ENTITLEMENTS"
+fi
+
+codesign --force --sign "$SIGNING_IDENTITY" --entitlements "$EXTENSION_ENTITLEMENTS" "$APPEX_BUNDLE"
+codesign --force --sign "$SIGNING_IDENTITY" --entitlements "$APP_ENTITLEMENTS" "$APP_BUNDLE"
+codesign --verify --deep --strict "$APP_BUNDLE"
 
 # 5. Install to /Applications for system-wide registration
 echo "📂 Installing to /Applications/OpenDuck.app..."

@@ -10,10 +10,16 @@ public final class ConnectionManager: @unchecked Sendable {
 
     private static let userDefaultsKey = "com.openduck.serverProfiles"
     public let keychain: KeychainHelper
+    public let keyBookmarks: SSHKeyBookmarkStore
     private let userDefaults: UserDefaults
 
-    public init(keychain: KeychainHelper = .shared, userDefaults: UserDefaults? = nil) {
+    public init(
+        keychain: KeychainHelper = .shared,
+        keyBookmarks: SSHKeyBookmarkStore = .shared,
+        userDefaults: UserDefaults? = nil
+    ) {
         self.keychain = keychain
+        self.keyBookmarks = keyBookmarks
         self.userDefaults = userDefaults ?? OpenDuckSharedStorage.userDefaults
         loadPersistedProfiles()
     }
@@ -74,7 +80,29 @@ public final class ConnectionManager: @unchecked Sendable {
             }
         }
         keychain.deleteSecret(for: id)
+        keyBookmarks.deleteBookmark(for: id)
         saveProfilesToDisk()
+    }
+
+    public func savePrivateKeyBookmark(_ bookmark: Data, for profileID: UUID) {
+        keyBookmarks.saveBookmark(bookmark, for: profileID)
+    }
+
+    public func hasPrivateKeyBookmark(for profileID: UUID) -> Bool {
+        keyBookmarks.hasBookmark(for: profileID)
+    }
+
+    /// Run by the containing app after an upgrade from builds whose credentials
+    /// were private to the host's keychain group.
+    @discardableResult
+    public func migrateLegacyCredentials() throws -> Int {
+        var migrated = 0
+        for profile in allProfiles() {
+            if try keychain.migrateLegacySecret(for: profile.id, account: profile.username) {
+                migrated += 1
+            }
+        }
+        return migrated
     }
 
     /// Retrieve a specific server profile by its unique ID.
@@ -148,13 +176,32 @@ public final class ConnectionManager: @unchecked Sendable {
     private func createAdapter(for profile: ServerProfile) throws -> RemoteFilesystemAdapter {
         switch profile.protocolType {
         case .sftp:
-            let secret = keychain.loadSecret(for: profile.id) ?? ""
+            let secret: String
+            do {
+                secret = try keychain.loadSecretOrThrow(for: profile.id) ?? ""
+            } catch {
+                throw AdapterError.authenticationFailed(error.localizedDescription)
+            }
             let authMethod: SFTPAuthMethod
             switch profile.authType {
             case .password:
                 authMethod = .password(secret)
             case .sshKey:
-                authMethod = .privateKey(keyPath: profile.privateKeyPath ?? "", passphrase: secret.isEmpty ? nil : secret)
+                if keyBookmarks.hasBookmark(for: profile.id) {
+                    do {
+                        let keyData = try keyBookmarks.loadPrivateKeyData(for: profile.id)
+                        authMethod = .privateKeyData(keyData, passphrase: secret.isEmpty ? nil : secret)
+                    } catch {
+                        throw AdapterError.authenticationFailed(error.localizedDescription)
+                    }
+                } else if OpenDuckSharedStorage.isBundledOpenDuckProcess {
+                    throw AdapterError.authenticationFailed(SSHKeyBookmarkError.missingBookmark.localizedDescription)
+                } else {
+                    authMethod = .privateKey(
+                        keyPath: profile.privateKeyPath ?? "",
+                        passphrase: secret.isEmpty ? nil : secret
+                    )
+                }
             }
 
             let config = SFTPConfiguration(

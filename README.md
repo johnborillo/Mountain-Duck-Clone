@@ -10,11 +10,12 @@
 
 ## 🛡️ Architecture & Security
 
-OpenDuck presents remote endpoints in Finder using the native File Provider path first. The older sparse-image mirror remains available as an explicitly labeled compatibility mode while the native domain matures:
+OpenDuck presents remote endpoints in Finder through the native replicated File Provider architecture:
 
 - 🗂️ **Native File Provider domains:** Each profile has a stable UUID-backed domain under Finder's Cloud Storage locations. Finder owns placeholders, materialization, and eviction; OpenDuck owns remote state and mutations.
-- 🖥️ **Legacy Preview / Mirror:** The APFS sparse-image path is retained for compatibility and diagnostics, but is no longer the default connection flow and is clearly labeled in the menu bar.
+- 🦆 **One Finder workflow:** The menu-bar app only registers native Finder domains. The experimental sparse-image `/Volumes` mirror remains internal test code and cannot be mistaken for a production mount.
 - 🚀 **Native Citadel SFTP Engine:** In-process, SwiftNIO SSH multiplexed transport. Zero subprocess shell-outs, zero batch-script injection risk, and full support for encrypted Ed25519/RSA SSH private keys and passwords.
+- 🔑 **Persistent sandbox-safe authentication:** Passwords and passphrases use a shared Keychain access group. SSH key files remain in place and are reopened by the File Provider extension through a read-only security-scoped bookmark.
 - 🔑 **Trust-On-First-Use (TOFU) Key Pinning:** Strict SHA-256 host key fingerprints stored in an isolated database and validated on every connection against OpenSSH `ssh-keygen -lf` standard format to prevent Man-In-The-Middle (MITM) attacks.
 - 🗄️ **Persistent SQLite WAL Engine:** Transactional metadata database (`MetadataDatabase.sqlite`) tracking placeholder, materialized, dirty, and uploading states across restarts and crashes.
 - 🧭 **Root confinement and stable versions:** Remote paths are canonicalized and rejected when they escape the configured root. File Provider versions use remote fingerprints so stale Finder edits become visible conflicts instead of silent overwrites.
@@ -60,7 +61,9 @@ To compile, assemble, sign ad hoc, and install the app plus File Provider extens
 ./scripts/build_app.sh
 ```
 
-The current distribution script is intentionally development-oriented (ad-hoc signing and a generated bundle). A notarized release still needs a canonical Xcode project, team signing, App Groups, and production entitlements.
+The current distribution script is development-oriented and defaults to ad-hoc signing. Ad-hoc builds cannot carry the restricted shared-Keychain entitlement, so password authentication and encrypted-key passphrases are only available to Finder in a correctly provisioned team-signed build; an unencrypted SSH key selected with **Browse** remains suitable for local development. Set `OPENDUCK_SIGNING_IDENTITY` to a valid signing identity when using matching App Group and Keychain provisioning. A distributable release still needs a canonical Xcode project, provisioning, hardened runtime, notarization, and release signing.
+
+After upgrading from an earlier build, OpenDuck automatically recreates only its broken local Finder domain records; remote SFTP data and the durable OpenDuck operation journal are not deleted. Existing SSH-key profiles must be edited once so the key can be selected with **Browse** and macOS can issue persistent read permission to the extension.
 
 ---
 
